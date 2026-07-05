@@ -1,14 +1,19 @@
 # -*- coding: utf-8 -*-
 """BuyOrWait Streamlit App: Purchase Decision / Bombing Alert / Ask Gemini / Why GPU.
 Queries only aggregated small tables in BigQuery, never touches raw data.
+The Purchase Decision tab overlays a 🔴 Live check pulled from the public Steam
+Web API (appreviews/storesearch) so any game — even post-snapshot releases —
+can be compared against the 2023-10 snapshot scores.
 Environment variables: GCP_PROJECT (required), BQ_DATASET (default: steam_intel)
   Ask Gemini tab: GEMINI_API_KEY (Google AI Studio key), or leave unset to use
   Vertex AI with the runtime service account (GEMINI_MODEL / VERTEX_LOCATION optional)
 """
 import os
 import re
+from datetime import datetime, timezone
 
 import pandas as pd
+import requests
 import streamlit as st
 from google.cloud import bigquery
 
@@ -45,6 +50,77 @@ def verdict(score: float, recent: float | None) -> str:
     return base
 
 
+# ---- 🔴 Live check: today's sentiment straight from the public Steam Web API ----
+STEAM_HDRS = {"User-Agent": "BuyOrWait/1.0 (hackathon demo)"}
+
+
+@st.cache_data(ttl=300, show_spinner="Searching Steam live...")
+def steam_search(term: str) -> pd.DataFrame:
+    r = requests.get("https://store.steampowered.com/api/storesearch/",
+                     params={"term": term, "l": "english", "cc": "US"},
+                     headers=STEAM_HDRS, timeout=10)
+    r.raise_for_status()
+    apps = [it for it in r.json().get("items", []) if it.get("type") == "app"]
+    return pd.DataFrame([{"appid": it["id"], "game": it["name"]} for it in apps])
+
+
+@st.cache_data(ttl=300, show_spinner="Contacting Steam API...")
+def steam_live(appid: int, pages: int = 2) -> dict | None:
+    """Overall totals plus a sample of the newest reviews for one game."""
+    base = f"https://store.steampowered.com/appreviews/{appid}"
+    common = {"json": 1, "language": "all", "purchase_type": "all"}
+    js = requests.get(base, params={**common, "num_per_page": 0},
+                      headers=STEAM_HDRS, timeout=10).json()
+    summ = js.get("query_summary", {})
+    if js.get("success") != 1 or not summ.get("total_reviews"):
+        return None
+    votes, newest, cursor = [], 0, "*"
+    for _ in range(pages):
+        js2 = requests.get(base, params={**common, "filter": "recent",
+                                         "num_per_page": 100, "cursor": cursor},
+                           headers=STEAM_HDRS, timeout=10).json()
+        revs = js2.get("reviews", [])
+        if not revs:
+            break
+        votes += [rv["voted_up"] for rv in revs]
+        newest = max(newest, max(rv["timestamp_created"] for rv in revs))
+        cursor = js2.get("cursor", "")
+        if len(revs) < 100 or not cursor:
+            break
+    return {
+        "desc": summ.get("review_score_desc", "—"),
+        "total": summ["total_reviews"],
+        "total_pos": summ.get("total_positive", 0) / summ["total_reviews"] * 100,
+        "sample_n": len(votes),
+        "sample_pos": sum(votes) / len(votes) * 100 if votes else None,
+        "newest": (datetime.fromtimestamp(newest, tz=timezone.utc).strftime("%Y-%m-%d")
+                   if newest else None),
+    }
+
+
+def live_panel(appid: int, snap_recent: float | None):
+    """Render live Steam metrics; never break the snapshot view if Steam is down."""
+    try:
+        live = steam_live(int(appid))
+    except Exception as e:
+        st.info(f"Steam API unreachable right now ({e}) — snapshot data above is unaffected.")
+        return
+    if live is None:
+        st.info("Steam reports no reviews for this app.")
+        return
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Overall rating (live)", live["desc"],
+              f"{live['total_pos']:.0f}% positive", delta_color="off")
+    c2.metric("Total reviews (live)", f"{live['total']:,}")
+    c3.metric(f"Newest {live['sample_n']} reviews",
+              "—" if live["sample_pos"] is None else f"{live['sample_pos']:.0f}% 👍",
+              None if (live["sample_pos"] is None or snap_recent is None)
+              else f"{live['sample_pos'] - snap_recent:+.0f}% vs snapshot recent 90d")
+    c4.metric("Newest review", live["newest"] or "—")
+    st.caption("Fetched seconds ago from the public Steam appreviews API — the same feed an "
+               "incremental ingestion job would stream into BigQuery to keep scores current.")
+
+
 st.title("🎮 BuyOrWait — To Buy or Not to Buy")
 st.caption("114M Steam reviews (snapshot through Oct 2023) · Playtime-weighted + 90-day half-life decay · RAPIDS cudf.pandas on NVIDIA L4 (GCE)")
 
@@ -57,7 +133,7 @@ with tab_buy:
              f"FROM {T('game_daily')}")["d"].iloc[0]
     st.caption(f"Scores as of **{asof}** (dataset snapshot). The pipeline anchors 'today' to the newest review in the data; "
                "wire the Steam API for live incremental updates.")
-    kw = st.text_input("Search Game Name", placeholder="e.g., Counter-Strike / Cyberpunk / Hollow Knight")
+    kw = st.text_input("Search Game Name", placeholder="e.g., Cyberpunk / Overwatch / Black Myth: Wukong")
     if kw:
         hits = q(f"""
             SELECT appid, game, score, raw_pos_rate, recent_pos_rate, n_reviews
@@ -65,7 +141,22 @@ with tab_buy:
             WHERE LOWER(game) LIKE CONCAT('%', LOWER(@kw), '%')
             ORDER BY n_reviews DESC LIMIT 20""", kw=kw)
         if hits.empty:
-            st.info("No games found, try another keyword.")
+            st.info("Not in the 2023-10 snapshot — searching Steam live instead…")
+            try:
+                live_hits = steam_search(kw)
+            except Exception as e:
+                live_hits = pd.DataFrame()
+                st.warning(f"Steam search failed: {e}")
+            if live_hits.empty:
+                st.info("No games found on Steam either, try another keyword.")
+            else:
+                opts = {f"{g}  (#{a})": int(a)
+                        for g, a in zip(live_hits["game"], live_hits["appid"])}
+                pick = st.selectbox("Found on Steam (live):", list(opts))
+                st.subheader("🔴 Live check — Steam right now")
+                live_panel(opts[pick], None)
+                st.caption("This game post-dates the snapshot, so it has no Purchase Confidence "
+                           "Score yet — rerunning the pipeline with fresh reviews would score it.")
         else:
             row = hits.iloc[0]
             if len(hits) > 1:
@@ -89,6 +180,11 @@ with tab_buy:
                 st.line_chart(daily["Positive Rate (7d rolling avg)"], height=260)
                 st.bar_chart(daily["n"].rename("Daily Review Count"), height=160)
 
+            st.divider()
+            st.subheader("🔴 Live check — Steam right now")
+            live_panel(int(row.appid),
+                       None if pd.isna(row.recent_pos_rate) else float(row.recent_pos_rate))
+
 # ---------------------------------------------------------------- Bombing Alert
 with tab_alert:
     c1, c2 = st.columns(2)
@@ -96,7 +192,7 @@ with tab_alert:
     minn = c2.slider("Min reviews on alert day (filters tiny-sample noise)", 3, 200, 30, 1)
     # One row per game = one bombing episode (multi-day alerts aggregated)
     alerts = q(f"""
-        SELECT ANY_VALUE(game)            AS game,
+        SELECT MAX(game)                  AS game,
                appid,
                DATE(TIMESTAMP_SECONDS(DIV(MIN(date), 1000000000)))            AS first_day,
                DATE(TIMESTAMP_SECONDS(DIV(MAX(date), 1000000000)))            AS latest_day,

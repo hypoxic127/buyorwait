@@ -4,3 +4,4 @@ db-dtypes>=1.2
 pandas>=2.1
 pyarrow>=15
 google-genai>=1.14
+requests>=2.31
