@@ -45,6 +45,7 @@ Hardware: GCE g2-standard-8 (8 vCPUs / 32GB RAM / NVIDIA L4 24GB), Ubuntu 24.04 
 
 ![Purchase Decision tab](docs/Purchasedecision.png)
 ![Bombing Alert tab](docs/BombingAlert.png)
+![Ask Gemini tab](docs/Askgemini.png)
 ![Why GPU tab](docs/WhyGPU.png)
 
 ## Reproduction
