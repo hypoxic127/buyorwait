@@ -83,10 +83,16 @@ def main():
         df["day_i"] = (df["timestamp_created"] // 86400).astype("int32")
         df["date"] = pd.to_datetime(df["day_i"].astype("int64") * 86400, unit="s")
         df = df.drop(columns=["timestamp_created"])
+        # Evergreen-score basis: UNDECAYED row-level weights. Once summed per day,
+        # the weighted score can be recomputed for ANY reference date in BigQuery
+        # via EXP(-age/90) at query time (see docs/evergreen.sql).
+        df["_lw"] = np.log1p(df["playtime_at_review"]).astype("float32")
+        df["_lwv"] = df["_lw"] * df["voted_up"]
 
     with timer("daily_groupby"):
         daily = (df.groupby(["appid", "date"], sort=False)
-                   .agg(n=("voted_up", "size"), pos=("voted_up", "sum"))
+                   .agg(n=("voted_up", "size"), pos=("voted_up", "sum"),
+                        w_sum=("_lw", "sum"), wv_sum=("_lwv", "sum"))
                    .reset_index())
         daily["neg"] = daily["n"] - daily["pos"]
         daily["pos_rate"] = (daily["pos"] / daily["n"]).astype("float32")
@@ -98,8 +104,7 @@ def main():
         # and double-groupby + merge from triggering cuDF fallback/copy overhead.
         ref_day = int(df["day_i"].max())
         age = (ref_day - df["day_i"]).astype("float32")
-        df["_w"] = (np.log1p(df["playtime_at_review"])
-                    * np.exp(-age / HALF_LIFE_DAYS)).astype("float32")
+        df["_w"] = (df["_lw"] * np.exp(-age / HALF_LIFE_DAYS)).astype("float32")
         df["_wv"] = df["_w"] * df["voted_up"]
         df["_rn"] = (age <= HALF_LIFE_DAYS).astype("int8")   # Whether review is within recent 90 days
         df["_rp"] = df["_rn"] * df["voted_up"]
