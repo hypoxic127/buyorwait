@@ -641,12 +641,26 @@ with tab_alert:
                      ROUND(MAX(LEAST(z, 99.9)),1)    AS peak_z
               FROM {T('v_alerts_all')}
               WHERE z >= @z AND n >= @minn
-              GROUP BY appid)
-            SELECT ep.game, c.summary AS why_bombed_ai, ep.first_day, ep.latest_day,
+              GROUP BY appid
+            ),
+            causes_agg AS (
+              SELECT appid,
+                     ANY_VALUE(summary) AS summary,
+                     ANY_VALUE(terms) AS terms
+              FROM {T('alert_causes')}
+              WHERE summary IS NOT NULL OR terms IS NOT NULL
+              GROUP BY appid
+            )
+            SELECT ep.game,
+                   COALESCE(
+                     c.summary,
+                     IF(c.terms IS NOT NULL AND c.terms != '', CONCAT('Top complaint terms: ', c.terms), NULL),
+                     CONCAT('Elevated negative review surge (', ep.peak_neg_pct, '% neg vs ', ep.baseline_neg_pct, '% baseline)')
+                   ) AS why_bombed_ai,
+                   ep.first_day, ep.latest_day,
                    ep.alert_days, ep.peak_daily_reviews, ep.peak_neg_pct,
                    ep.baseline_neg_pct, ep.peak_z, c.terms AS top_terms, ep.appid
-            FROM ep LEFT JOIN {T('alert_causes')} c
-              ON c.appid = ep.appid AND c.first_day = ep.first_day
+            FROM ep LEFT JOIN causes_agg c ON c.appid = ep.appid
             ORDER BY ep.latest_day DESC, ep.peak_daily_reviews DESC
             LIMIT 500""", z=float(zmin), minn=int(minn))
     except Exception:
@@ -657,7 +671,8 @@ with tab_alert:
                    COUNT(*) AS alert_days, MAX(n) AS peak_daily_reviews,
                    ROUND(MAX(neg_rate)*100,1)      AS peak_neg_pct,
                    ROUND(AVG(base_neg_rate)*100,1) AS baseline_neg_pct,
-                   ROUND(MAX(LEAST(z, 99.9)),1)    AS peak_z
+                   ROUND(MAX(LEAST(z, 99.9)),1)    AS peak_z,
+                   CONCAT('Elevated negative review surge (', ROUND(MAX(neg_rate)*100,1), '% neg)') AS why_bombed_ai
             FROM {T('alerts')}
             WHERE z >= @z AND n >= @minn
             GROUP BY appid
