@@ -116,6 +116,32 @@ header[data-testid="stHeader"] {
     border-right: 1px solid rgba(255, 255, 255, 0.08);
 }
 
+/* Fix Streamlit Selectbox and Multiselect Text Truncation & Popover Alignment */
+[data-testid="stSidebar"] div[data-baseweb="select"] {
+    border-radius: 8px;
+}
+[data-testid="stSidebar"] div[data-baseweb="select"] * {
+    white-space: normal !important;
+    word-wrap: break-word !important;
+    font-size: 13px !important;
+}
+
+/* Expand Dropdown Popover Menu Width to Avoid Horizontal Truncation */
+div[role="listbox"] {
+    min-width: 320px !important;
+    max-width: 420px !important;
+    background: #0f172a !important;
+    border: 1px solid rgba(56, 189, 248, 0.3) !important;
+    border-radius: 8px !important;
+    box-shadow: 0 10px 25px rgba(0,0,0,0.5) !important;
+}
+div[role="option"] {
+    white-space: normal !important;
+    word-wrap: break-word !important;
+    padding: 8px 12px !important;
+    font-size: 13px !important;
+}
+
 /* Streamlit Buttons */
 .stButton>button {
     border-radius: 8px;
@@ -280,13 +306,13 @@ def vsearch(appid: int, query: str, k: int = 20, polarity: bool | None = None) -
 
 
 RADAR_DIMS = {
-    "Monetization & In-Game Purchases": "microtransactions pay to win overpriced cash grab battle pass",
+    "Monetization & MTX": "microtransactions pay to win overpriced cash grab battle pass",
     "Low-End PC Performance": "fps drops stuttering lag poor optimization low end pc",
-    "Bugs & Technical Stability": "bugs crashes broken glitches corrupted save unplayable",
-    "Server & Online Connection": "servers down disconnect lag matchmaking dead online",
-    "Game Length & Content Shortage": "too short lacking content finished in a few hours",
-    "Repetitive Game Loop": "grindy repetitive boring farming time gated chores",
-    "Steam Deck & Controller Support": "steam deck controller support broken keyboard only",
+    "Bugs & Stability": "bugs crashes broken glitches corrupted save unplayable",
+    "Server & Disconnects": "servers down disconnect lag matchmaking dead online",
+    "Short Content": "too short lacking content finished in a few hours",
+    "Repetitive Grind": "grindy repetitive boring farming time gated chores",
+    "Steam Deck & Controller": "steam deck controller support broken keyboard only",
 }
 
 
@@ -343,15 +369,15 @@ with st.sidebar:
     st.caption("Define your life rhythm, gaming time budget, and dealbreakers to calculate personal fit.")
     
     my_rhythm = st.selectbox("Life Rhythm & Time Budget", [
-        "Busy Professional (Short 30m sessions)",
-        "Weekend Immersive Gamer (2-3h chunks)",
-        "Hardcore Binge Gamer (10+ hrs/week)"
+        "Busy (30m sessions)",
+        "Weekend (2-3h chunks)",
+        "Hardcore (10+ hrs/wk)"
     ], index=0)
     
     my_goal = st.selectbox("Emotional Objective", [
-        "Decompress After Work (Low Stress)",
-        "Seek Mastery & Challenge (Soulslike Flow)",
-        "Story & Narrative Immersion"
+        "Decompress (Low Stress)",
+        "Challenge (Soulslike)",
+        "Story & Narrative"
     ], index=0)
 
     my_device = st.selectbox("Hardware Platform", ["High-end PC", "Low-end PC", "Steam Deck"], index=0)
@@ -360,8 +386,8 @@ with st.sidebar:
     my_dims = st.multiselect("Personal Dealbreaker Filters", list(RADAR_DIMS), default=[])
     if my_device == "Low-end PC" and "Low-End PC Performance" not in my_dims:
         my_dims.append("Low-End PC Performance")
-    if my_device == "Steam Deck" and "Steam Deck & Controller Support" not in my_dims:
-        my_dims.append("Steam Deck & Controller Support")
+    if my_device == "Steam Deck" and "Steam Deck & Controller" not in my_dims:
+        my_dims.append("Steam Deck & Controller")
 
 tab_buy, tab_alert, tab_ask, tab_comp = st.tabs(
     ["Person-Game Fit", "Review Bombing & Crowd Noise", "Ask Gemini AI", "Player Ownership"])
