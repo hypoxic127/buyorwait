@@ -10,6 +10,7 @@ Environment variables: GCP_PROJECT (required), BQ_DATASET (default: steam_intel)
 """
 import os
 import re
+from contextlib import contextmanager
 from datetime import datetime, timezone
 
 import altair as alt          # bundled with Streamlit — no extra dependency
@@ -174,6 +175,91 @@ div[role="option"] {
     border-radius: 12px;
     overflow: hidden;
 }
+
+/* ---- Panels -------------------------------------------------------------
+   In Streamlit 1.58 a bordered container IS the stVerticalBlock (there is no
+   separate border wrapper), and stVerticalBlock is also used for every other
+   vertical block. panel() drops a hidden marker inside and the child-combinator
+   chain below matches ONLY that block — a bare :has(.panel-mark) would also
+   match every ancestor block containing the panel. Verified in-browser. */
+[data-testid="stVerticalBlock"]:has(
+    > [data-testid="stElementContainer"] > [data-testid="stMarkdown"] .panel-mark) {
+    background: rgba(20, 29, 46, 0.5);
+    border: 1px solid rgba(255, 255, 255, 0.07);
+    border-radius: 14px;
+    padding: 18px 22px;
+    backdrop-filter: blur(10px);
+    box-shadow: 0 2px 18px rgba(0, 0, 0, 0.18);
+}
+[data-testid="stElementContainer"]:has(.panel-mark),
+[data-testid="stMarkdown"]:has(.panel-mark) { display: none !important; }
+
+/* ---- Section headers ---------------------------------------------------- */
+.sec { margin: 6px 0 14px; }
+.sec-eyebrow {
+    font-size: 0.68rem; font-weight: 700; letter-spacing: 0.14em;
+    text-transform: uppercase; color: #38bdf8; margin-bottom: 5px;
+}
+.sec-title {
+    font-size: 1.28rem; font-weight: 700; color: #f1f5f9;
+    letter-spacing: -0.2px; line-height: 1.25;
+}
+.sec-sub { font-size: 0.87rem; color: #94a3b8; margin-top: 4px; line-height: 1.5; }
+
+/* ---- Review quotes: default blockquote is a thin grey rule, off-language -- */
+[data-testid="stMarkdownContainer"] blockquote {
+    border-left: 3px solid rgba(56, 189, 248, 0.45);
+    background: rgba(255, 255, 255, 0.03);
+    border-radius: 0 10px 10px 0;
+    padding: 10px 14px;
+    margin: 9px 0;
+    color: #cbd5e1;
+    font-size: 0.89rem;
+    line-height: 1.55;
+}
+
+/* ---- Hero band ---------------------------------------------------------- */
+.hero {
+    display: flex; align-items: flex-end; justify-content: space-between;
+    gap: 24px; flex-wrap: wrap;
+    padding-bottom: 16px; margin-bottom: 18px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+/* Cap the text column so the stats sit on the right instead of wrapping under it. */
+.hero > div:first-child { flex: 1 1 420px; max-width: 660px; }
+.hero-stats { display: flex; gap: 26px; padding-bottom: 2px; }
+
+/* The cover art's fullscreen button floats outside the image once the panel adds
+   padding, and it buys nothing on a header image. Charts/tables keep theirs. */
+[data-testid="stElementContainer"]:has([data-testid="stImage"]) [data-testid="stElementToolbar"],
+[data-testid="stElementContainer"]:has([data-testid="stImage"]) [data-testid="stElementToolbarButton"] {
+    display: none !important;
+}
+.hero-stat b {
+    display: block; font-size: 1.18rem; font-weight: 800; color: #e2e8f0;
+    line-height: 1.15; letter-spacing: -0.3px;
+}
+.hero-stat span {
+    font-size: 0.7rem; color: #7c8ba1; text-transform: uppercase;
+    letter-spacing: 0.09em; font-weight: 600;
+}
+/* System status reads blue; green/amber/red stay reserved for risk levels. */
+.sync-pill {
+    display: inline-flex; align-items: center; gap: 7px;
+    background: rgba(56, 189, 248, 0.09);
+    border: 1px solid rgba(56, 189, 248, 0.22);
+    padding: 5px 13px; border-radius: 20px; margin-bottom: 4px;
+}
+.sync-dot { width: 6px; height: 6px; border-radius: 50%; background: #38bdf8; }
+.sync-text { font-size: 12px; color: #94a3b8; }
+
+/* ---- Sidebar grouping --------------------------------------------------- */
+.side-group {
+    font-size: 0.66rem; font-weight: 700; letter-spacing: 0.13em;
+    text-transform: uppercase; color: #64748b;
+    margin: 16px 0 2px; padding-top: 12px;
+    border-top: 1px solid rgba(255, 255, 255, 0.07);
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -208,6 +294,28 @@ def q(sql: str, **params) -> pd.DataFrame:
 
 def T(name: str) -> str:
     return f"`{PROJECT}.{DATASET}.{name}`"
+
+
+@contextmanager
+def panel():
+    """A bordered surface. The hidden marker lets CSS style only our panels via :has(),
+    rather than every vertical block Streamlit wraps."""
+    box = st.container(border=True)
+    with box:
+        st.markdown('<span class="panel-mark"></span>', unsafe_allow_html=True)
+        yield box
+
+
+def section(title: str, eyebrow: str | None = None, sub: str | None = None):
+    """Consistent section header — replaces st.subheader, which renders every section
+    at identical weight and leaves the page with no scannable hierarchy."""
+    html = '<div class="sec">'
+    if eyebrow:
+        html += f'<div class="sec-eyebrow">{eyebrow}</div>'
+    html += f'<div class="sec-title">{title}</div>'
+    if sub:
+        html += f'<div class="sec-sub">{sub}</div>'
+    st.markdown(html + "</div>", unsafe_allow_html=True)
 
 
 def fit_verdict(score: float, red_flags: list) -> tuple[str, str, str]:
@@ -481,31 +589,43 @@ def _log_usage(event: str, game: str, appid: int):
         pass  # analytics must never break the app
 
 
-def freshness_badge():
+def hero():
+    """Header band: identity on the left, live scale on the right — the stats fill what
+    used to be dead space and give the page a top edge to hang the hierarchy from."""
+    games = reviews = None
+    status = "Snapshot loaded · nightly Steam sync running"
     try:
         f = q(f"SELECT last_sync, tracked_games, delta_reviews FROM {T('v_freshness')}").iloc[0]
         if pd.isna(f.last_sync):
             raise ValueError("no sync yet")
         hrs = max(0, int((pd.Timestamp.now(tz="UTC")
                           - pd.Timestamp(f.last_sync)).total_seconds() // 3600))
-        st.markdown(f"""
-        <div style="display: flex; align-items: center; gap: 8px; background: rgba(34, 197, 94, 0.1); border: 1px solid rgba(34, 197, 94, 0.25); padding: 6px 14px; border-radius: 20px; width: fit-content; margin-bottom: 14px;">
-            <span style="color: #4ade80; font-size: 13px; font-weight: 700; letter-spacing: 0.5px;">LIVE SYNC ACTIVE</span>
-            <span style="color: #94a3b8; font-size: 13px;">| Steam Sync <strong>{hrs}h ago</strong> · Ingested <strong>{int(f.tracked_games):,} games</strong> · <strong>+{int(f.delta_reviews):,}</strong> reviews synced</span>
-        </div>
-        """, unsafe_allow_html=True)
+        games, reviews = int(f.tracked_games), int(f.delta_reviews)
+        status = f"Live sync · {hrs}h ago"
     except Exception:
-        st.markdown("""
-        <div style="display: flex; align-items: center; gap: 8px; background: rgba(234, 179, 8, 0.1); border: 1px solid rgba(234, 179, 8, 0.25); padding: 6px 14px; border-radius: 20px; width: fit-content; margin-bottom: 14px;">
-            <span style="color: #facc15; font-size: 13px; font-weight: 700; letter-spacing: 0.5px;">SNAPSHOT ACTIVE</span>
-            <span style="color: #94a3b8; font-size: 13px;">| 114 Million Steam Reviews Loaded · Nightly Sync Ingesting</span>
-        </div>
-        """, unsafe_allow_html=True)
+        pass
+
+    stats = '<div class="hero-stat"><b>114M</b><span>reviews analysed</span></div>'
+    if games:
+        stats += f'<div class="hero-stat"><b>{games:,}</b><span>games synced</span></div>'
+    if reviews:
+        stats += f'<div class="hero-stat"><b>+{reviews:,}</b><span>new reviews</span></div>'
+
+    st.markdown(f"""
+    <div class="hero">
+      <div>
+        <div class="sync-pill"><span class="sync-dot"></span>
+          <span class="sync-text">{status}</span></div>
+        <div class="hero-title">BuyOrWait</div>
+        <div class="hero-subtitle">Person-to-Game Resonance Engine — matching your life
+          rhythm, time budget and hardware against real Steam player experience</div>
+      </div>
+      <div class="hero-stats">{stats}</div>
+    </div>
+    """, unsafe_allow_html=True)
 
 
-st.markdown('<div class="hero-title">BuyOrWait — Person-to-Game Resonance Engine</div>', unsafe_allow_html=True)
-st.markdown('<div class="hero-subtitle">Connecting Your Life Rhythm, Time Budget & Hardware to 114 Million Steam Player Experiences</div>', unsafe_allow_html=True)
-freshness_badge()
+hero()
 
 # ---- Sidebar: Your Life Profile & Gaming Persona -----------------------------
 with st.sidebar:
@@ -524,10 +644,13 @@ with st.sidebar:
         "Story & Narrative"
     ], index=0)
 
+    st.markdown('<div class="side-group">Setup</div>', unsafe_allow_html=True)
     my_device = st.selectbox("Hardware Platform", ["High-end PC", "Low-end PC", "Steam Deck"], index=0)
     my_hours = st.slider("Weekly Gaming Hours Budget", 1, 40, 6)
-    
-    my_dims = st.multiselect("Personal Dealbreaker Filters", list(RADAR_DIMS), default=[])
+
+    st.markdown('<div class="side-group">Dealbreakers</div>', unsafe_allow_html=True)
+    my_dims = st.multiselect("Personal Dealbreaker Filters", list(RADAR_DIMS), default=[],
+                             label_visibility="collapsed")
     auto_dims = []
     if my_device == "Low-end PC" and "Low-End PC Performance" not in my_dims:
         auto_dims.append("Low-End PC Performance")
@@ -603,7 +726,7 @@ with tab_buy:
                         for g, a in zip(live_hits["game"], live_hits["appid"])}
                 pick_live = st.selectbox("Found on Steam (live):", list(opts))
                 _log_usage("live_search", pick_live, opts[pick_live])
-                st.subheader("Live Verification — Steam API")
+                section("Live Verification", eyebrow="Straight from Steam")
                 live_panel(opts[pick_live], None)
                 st.caption("This game post-dates the main dataset, so its score is fetched directly from live Steam ratings.")
 
@@ -628,18 +751,19 @@ with tab_buy:
 
         fit_title, fit_desc, fit_color = fit_verdict(row.score_live, red_flags)
 
-        c_img, c_m = st.columns([1, 3])
-        c_img.image(f"https://cdn.cloudflare.steamstatic.com/steam/apps/{appid}/header.jpg",
-                    use_container_width=True)
-        with c_m:
-            st.markdown(verdict_badge(fit_title, fit_desc, fit_color), unsafe_allow_html=True)
-            m1, m2, m3 = st.columns(3)
-            m1.metric("Rating Score", f"{row.score_live:.0f}/100")
-            m2.metric("Recent 90-Day Rating",
-                      "—" if pd.isna(row.recent_pos_rate_live) else f"{row.recent_pos_rate_live:.0f}%",
-                      delta=None if (pd.isna(row.recent_pos_rate_live) or pd.isna(row.raw_pos_rate))
-                      else f"{row.recent_pos_rate_live - row.raw_pos_rate:+.0f}% vs overall")
-            m3.metric("Reviews Analyzed", f"{int(row.n_reviews_total):,}")
+        with panel():
+            c_img, c_m = st.columns([1, 3])
+            c_img.image(f"https://cdn.cloudflare.steamstatic.com/steam/apps/{appid}/header.jpg",
+                        use_container_width=True)
+            with c_m:
+                st.markdown(verdict_badge(fit_title, fit_desc, fit_color), unsafe_allow_html=True)
+                m1, m2, m3 = st.columns(3)
+                m1.metric("Rating Score", f"{row.score_live:.0f}/100")
+                m2.metric("Recent 90-Day Rating",
+                          "—" if pd.isna(row.recent_pos_rate_live) else f"{row.recent_pos_rate_live:.0f}%",
+                          delta=None if (pd.isna(row.recent_pos_rate_live) or pd.isna(row.raw_pos_rate))
+                          else f"{row.recent_pos_rate_live - row.raw_pos_rate:+.0f}% vs overall")
+                m3.metric("Reviews Analyzed", f"{int(row.n_reviews_total):,}")
             if (not pd.isna(row.recent_pos_rate_live)
                     and row.score_live - row.recent_pos_rate_live > 15):
                 st.warning("Recent 90-day sentiment is running more than 15 points below the "
@@ -656,50 +780,54 @@ with tab_buy:
             med_h = float(extra.iloc[0].pos_median_hours)
             weeks = med_h / max(my_hours, 1)
             rz = extra.iloc[0].refund_zone_pct
-            st.subheader("How This Game Fits Your Time")
-            k1, k2, k3 = st.columns(3)
-            k1.markdown(f"**Time-to-Joy Horizon**\n\n"
-                        f"Happy players hit their stride around **{med_h:.0f} hours** — "
-                        f"about **{weeks:.1f} weeks** at your **{my_hours}h/week** budget.")
-            k2.markdown(f"**Your Session Rhythm**\n\n"
-                        f"Profile: **{my_rhythm}**, seeking **{my_goal}**. "
-                        f"Weigh the pacing on the left against this.")
-            k3.markdown("**2-Hour Refund Window**\n\n"
-                        + (f"**{rz:.0f}%** of dissatisfied players bail inside Steam's refund "
-                           f"window — early pacing decides whether it sticks."
-                           if not pd.isna(rz) else "Refund-window data unavailable for this game."))
+            with panel():
+                section("How This Game Fits Your Time", eyebrow="Time budget")
+                k1, k2, k3 = st.columns(3)
+                k1.markdown(f"**Time-to-Joy Horizon**\n\n"
+                            f"Happy players hit their stride around **{med_h:.0f} hours** — "
+                            f"about **{weeks:.1f} weeks** at your **{my_hours}h/week** budget.")
+                k2.markdown(f"**Your Session Rhythm**\n\n"
+                            f"Profile: **{my_rhythm}**, seeking **{my_goal}**. "
+                            f"Weigh the pacing on the left against this.")
+                k3.markdown("**2-Hour Refund Window**\n\n"
+                            + (f"**{rz:.0f}%** of dissatisfied players bail inside Steam's refund "
+                               f"window — early pacing decides whether it sticks."
+                               if not pd.isna(rz) else "Refund-window data unavailable for this game."))
 
         # ---- Player Friction Radar: real per-game signal (replaces static filler) ----
-        st.subheader("Player Friction Radar")
-        if not radar:
-            st.caption("Not enough indexed reviews to profile player friction for this game.")
-        else:
-            ranked = sorted(
-                radar.items(),
-                key=lambda kv: {"High Risk": 0, "Moderate Risk": 1, "Low Risk": 2}[kv[1]["level"]])
-            chips = "".join(risk_chip(d, v["level"], d in my_dims) for d, v in ranked)
-            st.markdown(f'<div style="margin-bottom:8px;">{chips}</div>', unsafe_allow_html=True)
-            if my_dims:
-                st.caption("★ marks the dealbreakers from your profile.")
+        with panel():
+            section("Player Friction Radar", eyebrow="What actually goes wrong",
+                    sub="Share of this game's reviews that complain about each theme.")
+            if not radar:
+                st.caption("Not enough indexed reviews to profile player friction for this game.")
+            else:
+                ranked = sorted(
+                    radar.items(),
+                    key=lambda kv: {"High Risk": 0, "Moderate Risk": 1, "Low Risk": 2}[kv[1]["level"]])
+                chips = "".join(risk_chip(d, v["level"], d in my_dims) for d, v in ranked)
+                st.markdown(f'<div style="margin-bottom:10px;">{chips}</div>',
+                            unsafe_allow_html=True)
+                if my_dims:
+                    st.caption("★ marks the dealbreakers from your profile.")
 
-            col_love, col_quit = st.columns(2)
-            praise = vsearch(appid, PRAISE_Q, k=10, polarity=True)
-            with col_love:
-                st.markdown("**What fans praise**")
-                if praise.empty:
-                    st.caption("No positive review evidence indexed.")
-                else:
-                    for t in praise["text"].head(3):
-                        st.markdown(f"> {snippet(t)}")
-            with col_quit:
-                st.markdown("**What critics hit hardest**")
-                top_neg = [v for _, v in ranked if v["level"] != "Low Risk"][:1]
-                neg_texts = top_neg[0]["texts"][:3] if top_neg else []
-                if not neg_texts:
-                    st.caption("No significant friction found in indexed reviews.")
-                else:
-                    for t in neg_texts:
-                        st.markdown(f"> {snippet(t)}")
+                col_love, col_quit = st.columns(2)
+                praise = vsearch(appid, PRAISE_Q, k=10, polarity=True)
+                with col_love:
+                    st.markdown("**What fans praise**")
+                    if praise.empty:
+                        st.caption("No positive review evidence indexed.")
+                    else:
+                        for t in praise["text"].head(3):
+                            st.markdown(f"> {snippet(t)}")
+                with col_quit:
+                    st.markdown("**What critics hit hardest**")
+                    top_neg = [v for _, v in ranked if v["level"] != "Low Risk"][:1]
+                    neg_texts = top_neg[0]["texts"][:3] if top_neg else []
+                    if not neg_texts:
+                        st.caption("No significant friction found in indexed reviews.")
+                    else:
+                        for t in neg_texts:
+                            st.markdown(f"> {snippet(t)}")
 
         # ---------------- AI Life-Context Persona Analysis ----
         st.write("")
@@ -748,37 +876,39 @@ with tab_buy:
             daily["n"] = daily["n"].fillna(0)
             daily = daily.reset_index()
 
-            st.subheader("Sentiment & Volume Over Time")
-            # Two measures on different scales -> two charts, never a dual y-axis.
-            x_enc = alt.X("day:T", axis=alt.Axis(title=None, format="%Y", tickCount=6))
-            hover = alt.selection_point(fields=["day"], nearest=True,
-                                        on="mouseover", empty=False)
-            tips = [alt.Tooltip("day:T", title="Date"),
-                    alt.Tooltip("pos_pct:Q", title="Positive rate %", format=".1f"),
-                    alt.Tooltip("n:Q", title="Reviews that day", format=",")]
-            base = alt.Chart(daily).encode(x=x_enc)
-            line = base.mark_line(color=CHART_ACCENT, strokeWidth=2).encode(
-                y=alt.Y("pos_pct:Q", scale=alt.Scale(zero=False),
-                        axis=alt.Axis(title="Positive rate (%) · 7-day average")))
-            # Invisible until hovered: gives a crosshair-style readout without ink noise.
-            marks = base.mark_point(color=CHART_ACCENT, size=70, filled=True).encode(
-                y=alt.Y("pos_pct:Q"), tooltip=tips,
-                opacity=alt.condition(hover, alt.value(1), alt.value(0))).add_params(hover)
-            st.altair_chart(chart_theme(alt.layer(line, marks).properties(height=240)),
-                            use_container_width=True, theme=None)
+            with panel():
+                section("Sentiment & Volume Over Time", eyebrow="History")
+                # Two measures on different scales -> two charts, never a dual y-axis.
+                x_enc = alt.X("day:T", axis=alt.Axis(title=None, format="%Y", tickCount=6))
+                hover = alt.selection_point(fields=["day"], nearest=True,
+                                            on="mouseover", empty=False)
+                tips = [alt.Tooltip("day:T", title="Date"),
+                        alt.Tooltip("pos_pct:Q", title="Positive rate %", format=".1f"),
+                        alt.Tooltip("n:Q", title="Reviews that day", format=",")]
+                base = alt.Chart(daily).encode(x=x_enc)
+                line = base.mark_line(color=CHART_ACCENT, strokeWidth=2).encode(
+                    y=alt.Y("pos_pct:Q", scale=alt.Scale(zero=False),
+                            axis=alt.Axis(title="Positive rate (%) · 7-day average")))
+                # Invisible until hovered: a crosshair-style readout without ink noise.
+                marks = base.mark_point(color=CHART_ACCENT, size=70, filled=True).encode(
+                    y=alt.Y("pos_pct:Q"), tooltip=tips,
+                    opacity=alt.condition(hover, alt.value(1), alt.value(0))).add_params(hover)
+                st.altair_chart(chart_theme(alt.layer(line, marks).properties(height=240)),
+                                use_container_width=True, theme=None)
 
-            vol = alt.Chart(daily).mark_bar(color=CHART_MUTED, cornerRadiusEnd=2).encode(
-                x=x_enc, y=alt.Y("n:Q", axis=alt.Axis(title="Reviews per day")),
-                tooltip=tips)
-            st.altair_chart(chart_theme(vol.properties(height=130)),
-                            use_container_width=True, theme=None)
-            st.caption("Reviews up to 2023-10-30 come from the snapshot; later days come from "
-                       "the nightly Steam sync.")
+                vol = alt.Chart(daily).mark_bar(color=CHART_MUTED, cornerRadiusEnd=2).encode(
+                    x=x_enc, y=alt.Y("n:Q", axis=alt.Axis(title="Reviews per day")),
+                    tooltip=tips)
+                st.altair_chart(chart_theme(vol.properties(height=130)),
+                                use_container_width=True, theme=None)
+                st.caption("Reviews up to 2023-10-30 come from the snapshot; later days come "
+                           "from the nightly Steam sync.")
 
-        st.divider()
-        st.subheader("Live Verification — Steam API")
-        live_panel(appid,
-                   None if pd.isna(row.recent_pos_rate_live) else float(row.recent_pos_rate_live))
+        with panel():
+            section("Live Verification", eyebrow="Straight from Steam",
+                    sub="Fetched live, so a game's current mood can be compared with the snapshot.")
+            live_panel(appid,
+                       None if pd.isna(row.recent_pos_rate_live) else float(row.recent_pos_rate_live))
 
 # ---------------------------------------------------------------- Bombing Alert
 with tab_alert:
@@ -1139,11 +1269,11 @@ def composition_total() -> int:
 
 
 with tab_comp:
-    st.subheader("Player Ownership & Review Quality")
     _n_comp = composition_total()
-    st.caption("How players acquired each game — Direct Purchase, Free / Gift Keys, and "
-               "Early Access share of reviews"
-               + (f", across {_n_comp:,} games." if _n_comp else "."))
+    section("Player Ownership & Review Quality", eyebrow="Who is reviewing",
+            sub="How players acquired each game — direct purchase, free / gift keys, and "
+                "Early Access share of reviews"
+                + (f", across {_n_comp:,} games." if _n_comp else "."))
     c_s, _ = st.columns([2, 1])
     search_kw = c_s.text_input("Filter by game title:", placeholder="e.g., Cyberpunk / Elden Ring / Counter-Strike", label_visibility="collapsed")
     try:
