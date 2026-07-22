@@ -114,6 +114,18 @@ header[data-testid="stHeader"] {
     border: 1px solid rgba(56, 189, 248, 0.4);
     box-shadow: 0 4px 12px rgba(56, 189, 248, 0.15);
 }
+/* Nested (sub-)tabs read as secondary to the main nav: smaller, tighter, quieter. */
+[data-testid="stTabs"] [data-testid="stTabs"] button[data-baseweb="tab"] {
+    font-size: 13px;
+    padding: 6px 15px;
+    margin-right: 4px;
+    background: rgba(15, 23, 42, 0.28);
+}
+[data-testid="stTabs"] [data-testid="stTabs"] button[data-baseweb="tab"][aria-selected="true"] {
+    background: rgba(56, 189, 248, 0.13);
+    box-shadow: none;
+}
+
 /* Hide the default red BaseWeb tab underline highlight so our pill styling reads cleanly */
 [data-testid="stTabs"] [data-baseweb="tab-highlight"],
 [data-testid="stTabs"] [data-baseweb="tab-border"] {
@@ -694,6 +706,55 @@ def _pick_game(label: str):
     st.session_state["game_pick"] = label
 
 
+@st.cache_data(ttl=600, show_spinner="Gemini is weighing this game against your profile...")
+def life_fit_analysis(appid: int, game: str, rhythm: str, goal: str, device: str) -> str:
+    """Cached so the verdict survives reruns. It previously ran inline inside
+    `if st.button(...)`, which is only true on the click itself — so any later interaction
+    erased the analysis, and because the call was uncached, regenerating cost another
+    Gemini request."""
+    pros = vsearch(int(appid), PRAISE_Q, 10, polarity=True)
+    cons = vsearch(int(appid), CRITIC_Q, 10, polarity=False)
+    if pros.empty and cons.empty:
+        return ""
+    ev_p = "\n".join(f"- {t[:200]}" for t in pros["text"].head(8))
+    ev_c = "\n".join(f"- {t[:200]}" for t in cons["text"].head(8))
+    client = _genai_client()
+    return client.models.generate_content(
+        model=GEMINI_MODEL,
+        contents=(f"Analyze player reviews for '{game}' specifically considering a user "
+                  f"with profile:\n- Life Rhythm: {rhythm}\n- Emotional Goal: {goal}\n"
+                  f"- Hardware: {device}\n"
+                  f"Evidence:\nPOSITIVE REVIEWS:\n{ev_p}\nNEGATIVE REVIEWS:\n{ev_c}\n"
+                  "Write in simple markdown:\n"
+                  "#### Reasons This Fits Your Life (Pros)\n(3 bullet points)\n"
+                  "#### Potential Friction & Life Conflicts (Cons)\n(3 bullet points)\n"
+                  "#### Personal Life Verdict\n(2 decisive sentences on whether this game "
+                  "respects the user's time and life rhythm).")).text
+
+
+def render_ai_analysis(appid: int, game: str, rhythm: str, goal: str, device: str):
+    section("AI Life-Context Fit", eyebrow="Your profile vs. real reviews",
+            sub="Gemini reads this game's reviews through your rhythm, goal and hardware.")
+    key = (int(appid), rhythm, goal, device)
+    if st.button("Generate analysis", key=f"court_{appid}", type="primary"):
+        st.session_state["fit_ai_key"] = key
+    if st.session_state.get("fit_ai_key") != key:
+        st.caption("Runs on demand — one Gemini call, then kept for the rest of the session.")
+        return
+    try:
+        md = life_fit_analysis(int(appid), game, rhythm, goal, device)
+    except Exception as e:
+        st.error("Gemini is unavailable right now — everything else on this page still works.")
+        with st.expander("Technical details"):
+            st.write(str(e))
+        return
+    if not md:
+        st.info("No indexed review evidence found for this game.")
+    else:
+        st.markdown(md)
+        st.caption("Written from this game's actual reviews, weighed against your profile.")
+
+
 # ---------------------------------------------------------------- Person-Game Fit
 @st.fragment
 def person_game_fit(my_rhythm, my_goal, my_device, my_hours, my_dims):
@@ -811,6 +872,17 @@ def person_game_fit(my_rhythm, my_goal, my_device, my_hours, my_dims):
                 st.warning("Recent 90-day sentiment is running more than 15 points below the "
                            "overall score — momentum may be cooling.")
 
+        # The detail below used to be one long vertical stack: you had to scroll past
+        # three panels to reach the AI button, and its output then pushed everything
+        # further down. Sub-tabs keep the decision card in view and put each block one
+        # click away. Sections stay in their original code order — the tab objects are
+        # entered as extra context managers, which is also why nothing needed reindenting.
+        t_ai, t_radar, t_time, t_live = st.tabs(
+            ["AI Fit Analysis", "Friction Radar", "Time & Trend", "Live Check"])
+
+        with t_ai, panel():
+            render_ai_analysis(appid, str(row.game), my_rhythm, my_goal, my_device)
+
         # ---- How this game fits your time (real data: median hours + refund risk) ----
         try:
             extra = q(f"""SELECT refund_zone_pct, pos_median_hours
@@ -822,7 +894,7 @@ def person_game_fit(my_rhythm, my_goal, my_device, my_hours, my_dims):
             med_h = float(extra.iloc[0].pos_median_hours)
             weeks = med_h / max(my_hours, 1)
             rz = extra.iloc[0].refund_zone_pct
-            with panel():
+            with t_time, panel():
                 section("How This Game Fits Your Time", eyebrow="Time budget")
                 k1, k2, k3 = st.columns(3)
                 k1.markdown(f"**Time-to-Joy Horizon**\n\n"
@@ -837,7 +909,7 @@ def person_game_fit(my_rhythm, my_goal, my_device, my_hours, my_dims):
                                if not pd.isna(rz) else "Refund-window data unavailable for this game."))
 
         # ---- Player Friction Radar: real per-game signal (replaces static filler) ----
-        with panel():
+        with t_radar, panel():
             section("Player Friction Radar", eyebrow="What actually goes wrong",
                     sub="Share of this game's reviews that complain about each theme.")
             if not radar:
@@ -878,37 +950,6 @@ def person_game_fit(my_rhythm, my_goal, my_device, my_hours, my_dims):
                         for t in neg_texts:
                             st.markdown(f"> {snippet(t)}")
 
-        # ---------------- AI Life-Context Persona Analysis ----
-        st.write("")
-        if st.button("Generate AI Life-Context Fit Analysis", key=f"court_{appid}",
-                     type="primary", use_container_width=True):
-            pros = vsearch(appid, PRAISE_Q, 10, polarity=True)
-            cons = vsearch(appid, CRITIC_Q, 10, polarity=False)
-            if pros.empty and cons.empty:
-                st.info("No indexed review evidence found for this game.")
-            else:
-                ev_p = "\n".join(f"- {t[:200]}" for t in pros["text"].head(8))
-                ev_c = "\n".join(f"- {t[:200]}" for t in cons["text"].head(8))
-                try:
-                    _gc = _genai_client()
-                    verdictmd = _gc.models.generate_content(
-                        model=GEMINI_MODEL,
-                        contents=(f"Analyze player reviews for '{row.game}' specifically considering a user with profile:\n"
-                                  f"- Life Rhythm: {my_rhythm}\n"
-                                  f"- Emotional Goal: {my_goal}\n"
-                                  f"- Hardware: {my_device}\n"
-                                  f"Evidence:\n"
-                                  f"POSITIVE REVIEWS:\n{ev_p}\n"
-                                  f"NEGATIVE REVIEWS:\n{ev_c}\n"
-                                  "Write in simple markdown:\n"
-                                  "#### Reasons This Fits Your Life (Pros)\n(3 bullet points)\n"
-                                  "#### Potential Friction & Life Conflicts (Cons)\n(3 bullet points)\n"
-                                  "#### Personal Life Verdict\n(2 decisive sentences on whether this game respects the user's time and life rhythm).")).text
-                    st.markdown(verdictmd)
-                    st.caption("AI evaluates how this game interacts with your specific time budget and emotional goal.")
-                except Exception as e:
-                    st.error(f"Gemini service unavailable: {e}")
-
         daily = q(f"""
             SELECT day, n, SAFE_DIVIDE(pos, n) AS pos_rate
             FROM {T('v_daily_all')} WHERE appid = @a ORDER BY day""", a=appid)
@@ -933,7 +974,7 @@ def person_game_fit(my_rhythm, my_goal, my_device, my_hours, my_dims):
             daily["n"] = daily["n"].fillna(0)
             daily = daily.reset_index()
 
-            with panel():
+            with t_time, panel():
                 section("Sentiment & Volume Over Time", eyebrow="History")
                 # Two measures on different scales -> two charts, never a dual y-axis.
                 x_enc = alt.X("day:T", axis=alt.Axis(title=None, format="%Y", tickCount=6))
@@ -963,7 +1004,7 @@ def person_game_fit(my_rhythm, my_goal, my_device, my_hours, my_dims):
                 st.caption("Reviews up to 2023-10-30 come from the snapshot; later days come "
                            "from the nightly Steam sync.")
 
-        with panel():
+        with t_live, panel():
             section("Live Verification", eyebrow="Straight from Steam",
                     sub="Compare this game's mood right now against the snapshot above.")
             # Three blocking HTTP calls (~2s, up to 30s if Steam is slow) used to run on
