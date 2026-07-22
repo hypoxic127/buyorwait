@@ -21,7 +21,7 @@ PROJECT = os.environ.get("GCP_PROJECT", "buyorwait-2026")
 DATASET = os.environ.get("BQ_DATASET", "steam_intel")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
 
-st.set_page_config(page_title="BuyOrWait — Steam Review Intelligence Platform", page_icon="🎮", layout="wide")
+st.set_page_config(page_title="BuyOrWait — Steam Game Decision Engine", page_icon="🎮", layout="wide")
 
 # Modern Glassmorphism Dark Theme CSS
 st.markdown("""
@@ -165,7 +165,7 @@ def T(name: str) -> str:
 def verdict(score: float, recent: float | None) -> str:
     base = "RECOMMENDED (Buy)" if score >= 70 else ("PROCEED WITH CAUTION (Wait)" if score >= 40 else "NOT RECOMMENDED (Skip)")
     if recent is not None and not pd.isna(recent) and recent + 15 < score:
-        base += " (Recent sentiment decline detected)"
+        base += " (Recent rating drop detected)"
     return base
 
 
@@ -228,16 +228,15 @@ def live_panel(appid: int, snap_recent: float | None):
         st.info("Steam reports no reviews for this app.")
         return
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Overall rating (live)", live["desc"],
+    c1.metric("Overall Rating (Steam Live)", live["desc"],
               f"{live['total_pos']:.0f}% positive", delta_color="off")
-    c2.metric("Total reviews (live)", f"{live['total']:,}")
-    c3.metric(f"Newest {live['sample_n']} reviews",
+    c2.metric("Total Reviews (Live)", f"{live['total']:,}")
+    c3.metric(f"Newest {live['sample_n']} Reviews",
               "—" if live["sample_pos"] is None else f"{live['sample_pos']:.0f}% Positive",
               None if (live["sample_pos"] is None or snap_recent is None)
-              else f"{live['sample_pos'] - snap_recent:+.0f}% vs snapshot recent 90d")
-    c4.metric("Newest review", live["newest"] or "—")
-    st.caption("Fetched seconds ago from the public Steam appreviews API — the same feed an "
-               "incremental ingestion job would stream into BigQuery to keep scores current.")
+              else f"{live['sample_pos'] - snap_recent:+.0f}% vs recent snapshot")
+    c4.metric("Newest Review Date", live["newest"] or "—")
+    st.caption("Live data fetched directly from Steam API to keep scores up to date.")
 
 
 # ---- Semantic layer: query embedding + BigQuery VECTOR_SEARCH ----------------
@@ -277,13 +276,13 @@ def vsearch(appid: int, query: str, k: int = 20, polarity: bool | None = None) -
 
 
 RADAR_DIMS = {
-    "Monetization & MTX": "microtransactions pay to win overpriced cash grab battle pass",
+    "Monetization & In-Game Purchases": "microtransactions pay to win overpriced cash grab battle pass",
     "Low-End PC Performance": "fps drops stuttering lag poor optimization low end pc",
-    "Bugs & Stability": "bugs crashes broken glitches corrupted save unplayable",
-    "Server & Network Stability": "servers down disconnect lag matchmaking dead online",
-    "Content Depth & Length": "too short lacking content finished in a few hours",
-    "Repetitive Grind": "grindy repetitive boring farming time gated chores",
-    "Steam Deck & Controller": "steam deck controller support broken keyboard only",
+    "Bugs & Technical Stability": "bugs crashes broken glitches corrupted save unplayable",
+    "Server & Online Connection": "servers down disconnect lag matchmaking dead online",
+    "Game Length & Content Shortage": "too short lacking content finished in a few hours",
+    "Repetitive Game Loop": "grindy repetitive boring farming time gated chores",
+    "Steam Deck & Controller Support": "steam deck controller support broken keyboard only",
 }
 
 
@@ -325,26 +324,26 @@ def freshness_badge():
         st.markdown("""
         <div style="display: flex; align-items: center; gap: 8px; background: rgba(234, 179, 8, 0.1); border: 1px solid rgba(234, 179, 8, 0.25); padding: 6px 14px; border-radius: 20px; width: fit-content; margin-bottom: 14px;">
             <span style="color: #facc15; font-size: 13px; font-weight: 700; letter-spacing: 0.5px;">SNAPSHOT ACTIVE</span>
-            <span style="color: #94a3b8; font-size: 13px;">| 114M Review Corpus Loaded · Nightly Sync Ingesting</span>
+            <span style="color: #94a3b8; font-size: 13px;">| 114 Million Steam Reviews Loaded · Nightly Sync Ingesting</span>
         </div>
         """, unsafe_allow_html=True)
 
 
-st.markdown('<div class="hero-title">BuyOrWait — Steam Review Intelligence Engine</div>', unsafe_allow_html=True)
-st.markdown('<div class="hero-subtitle">114M Steam Review Corpus · 90-Day Exponential Half-Life Model · Gemini AI Agent</div>', unsafe_allow_html=True)
+st.markdown('<div class="hero-title">BuyOrWait — Steam Game Decision Engine</div>', unsafe_allow_html=True)
+st.markdown('<div class="hero-subtitle">114 Million Steam Reviews · Real-Time Rating Adjustments · Gemini AI Assistant</div>', unsafe_allow_html=True)
 freshness_badge()
 
 # ---- My Radar: personal dealbreaker profile (session-only, no login) ---------
 with st.sidebar:
-    st.header("Personal Risk Radar")
-    st.caption("Customize your hardware, time budget, and dealbreaker dimensions to generate personalized purchase recommendations.")
+    st.header("Personal Risk Profile")
+    st.caption("Select your hardware and potential dealbreakers to see if this game fits your preferences.")
     my_dims = st.multiselect("Personal Dealbreakers", list(RADAR_DIMS), default=[])
     my_device = st.selectbox("Hardware Platform", ["High-end PC", "Low-end PC", "Steam Deck"], index=0)
-    my_hours = st.slider("Gaming Hours / Week", 1, 40, 8)
+    my_hours = st.slider("Gaming Hours per Week", 1, 40, 8)
     if my_device == "Low-end PC" and "Low-End PC Performance" not in my_dims:
         my_dims.append("Low-End PC Performance")
-    if my_device == "Steam Deck" and "Steam Deck & Controller" not in my_dims:
-        my_dims.append("Steam Deck & Controller")
+    if my_device == "Steam Deck" and "Steam Deck & Controller Support" not in my_dims:
+        my_dims.append("Steam Deck & Controller Support")
 
 tab_buy, tab_alert, tab_ask, tab_comp = st.tabs(
     ["Purchase Decision", "Review Bombing Alerts", "Ask Gemini AI", "Player Composition"])
@@ -358,7 +357,7 @@ with tab_buy:
                         labels, index=None,
                         placeholder="e.g., Cyberpunk 2077 / Overwatch 2 / ELDEN RING")
 
-    with st.expander("Game not listed? Search Steam live (post-2023 releases)"):
+    with st.expander("Game not listed? Search Steam live"):
         kw_live = st.text_input("Steam live search", placeholder="e.g., Black Myth: Wukong")
         if kw_live:
             try:
@@ -373,10 +372,9 @@ with tab_buy:
                         for g, a in zip(live_hits["game"], live_hits["appid"])}
                 pick_live = st.selectbox("Found on Steam (live):", list(opts))
                 _log_usage("live_search", pick_live, opts[pick_live])
-                st.subheader("Live Verification — Steam Web API")
+                st.subheader("Live Verification — Steam API")
                 live_panel(opts[pick_live], None)
-                st.caption("This game post-dates the snapshot, so it has no Purchase Confidence "
-                           "Score yet — tonight's sync starts scoring it once it enters the top tracked set.")
+                st.caption("This game post-dates the main dataset, so its score is fetched directly from live Steam ratings.")
 
     if pick:
         appid = int(pick.rsplit("#", 1)[1].rstrip(")"))
@@ -389,83 +387,81 @@ with tab_buy:
                     use_container_width=True)
         with c_m:
             c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Purchase Confidence (0-100)", f"{row.score_live:.0f}")
+            c1.metric("Recommendation Score (0-100)", f"{row.score_live:.0f}")
             c2.metric("Verdict", verdict(row.score_live, row.recent_pos_rate_live))
-            c3.metric("Recent 90d Positive Rate",
+            c3.metric("Recent 90-Day Rating",
                       "—" if pd.isna(row.recent_pos_rate_live) else f"{row.recent_pos_rate_live:.0f}%",
                       delta=None if (pd.isna(row.recent_pos_rate_live) or pd.isna(row.raw_pos_rate))
-                      else f"{row.recent_pos_rate_live - row.raw_pos_rate:+.0f}% vs all-time")
-            c4.metric("Reviews Analyzed", f"{int(row.n_reviews_total):,}")
-        with st.expander("Score Rationale & Decay Model"):
+                      else f"{row.recent_pos_rate_live - row.raw_pos_rate:+.0f}% vs overall")
+            c4.metric("Total Reviews Analyzed", f"{int(row.n_reviews_total):,}")
+        with st.expander("Why This Score?"):
             st.markdown(
-                f"- **All-time positive rate:** {row.raw_pos_rate:.0f}% — baseline store page ratio\n"
-                f"- **Confidence score:** {row.score_live:.0f} — weighted by "
-                f"`log(1+playtime) × exp(−age/90d)`, anchored to **today**\n"
-                f"- **Recent 90 days:** "
+                f"- **All-Time Positive Rating:** {row.raw_pos_rate:.0f}% — standard Steam store percentage\n"
+                f"- **Recommendation Score:** {row.score_live:.0f} — gives higher weight to **recent reviews** and **players with long playtimes**\n"
+                f"- **Recent 90-Day Rating:** "
                 f"{'no recent reviews' if pd.isna(row.recent_pos_rate_live) else f'{row.recent_pos_rate_live:.0f}% positive over {int(row.recent_n_live):,} reviews'}\n"
-                f"- **Latest review date:** {row.last_review_day}\n\n"
-                "A large divergence between confidence score and all-time positive rate indicates recent sentiment shifts (patch updates or review bombing)."
+                f"- **Latest Review Date:** {row.last_review_day}\n\n"
+                "A noticeable gap between the recommendation score and all-time rating signals recent game updates or review bombing."
             )
 
-        # Reviewer composition X-ray
+        # Reviewer composition
         try:
             comp = q(f"""SELECT n, purchase_pct, free_pct, ea_pct
                          FROM {T('game_composition')} WHERE appid = @a""", a=appid)
             if not comp.empty:
                 c0 = comp.iloc[0]
-                st.caption(f"Reviewer Acquisition Mix ({int(c0.n):,} reviews): "
-                           f"{c0.purchase_pct:.0f}% Direct Purchase · "
-                           f"{c0.free_pct:.0f}% Free/Gift Key · "
-                           f"{c0.ea_pct:.0f}% Early Access Reviewers")
+                st.caption(f"Player Ownership Breakdown ({int(c0.n):,} reviews): "
+                           f"{c0.purchase_pct:.0f}% Bought on Steam · "
+                           f"{c0.free_pct:.0f}% Free / Gift Keys · "
+                           f"{c0.ea_pct:.0f}% Early Access Players")
         except Exception:
             pass
 
-        # ---------------- For YOU: personal collision card ----------------
+        # ---------------- For YOU: personal warning radar ----------------
         try:
             extra = q(f"""SELECT refund_zone_pct, pos_median_hours
                           FROM {T('game_scores')} WHERE appid = @a""", a=appid)
         except Exception:
             extra = pd.DataFrame()
-        st.subheader("Personalized Dealbreaker Radar")
+        st.subheader("Personal Warning Radar")
         red_flags = []
         if my_dims:
             cols = st.columns(min(len(my_dims), 4))
             for i, dim in enumerate(my_dims):
                 hits = vsearch(appid, RADAR_DIMS[dim], k=25, polarity=False)
                 if hits.empty:
-                    cols[i % 4].metric(dim, "—", "not in indexed set", delta_color="off")
+                    cols[i % 4].metric(dim, "—", "no matching reviews", delta_color="off")
                     continue
                 level, n = radar_level(hits)
                 if level.startswith("High"):
                     red_flags.append(dim)
                 cols[i % 4].metric(dim, level, f"{n} relevant complaints", delta_color="off")
-                with cols[i % 4].popover("View Evidence Quotes"):
+                with cols[i % 4].popover("See What Players Say"):
                     for t in hits["text"].head(3):
                         st.caption(f"“{t[:220]}…”")
         if not extra.empty and not pd.isna(extra.iloc[0].pos_median_hours):
             med_h = float(extra.iloc[0].pos_median_hours)
             weeks = med_h / max(my_hours, 1)
             rz = extra.iloc[0].refund_zone_pct
-            line = (f"Optimal Immersion Curve: Happy players reach core satisfaction at **{med_h:.0f}h** — "
-                    f"at your {my_hours}h/week budget, that represents **~{weeks:.1f} weeks** to full value.")
+            line = (f"Player Engagement: Satisfied players spend an average of **{med_h:.0f} hours** in game — "
+                    f"at your {my_hours}h/week pace, that is **~{weeks:.1f} weeks** of gameplay.")
             if not pd.isna(rz):
-                line += (f" | Steam Refund Window: {rz:.0f}% of dissatisfied players requested a refund "
-                         f"within the 2-hour window.")
+                line += (f" | Refund Zone: {rz:.0f}% of unhappy players quit within the 2-hour Steam refund cutoff.")
             st.markdown(line)
         if red_flags:
-            st.error(f"Personal Verdict: PROCEED WITH CAUTION — Your selected dealbreakers "
-                     f"({', '.join(red_flags)}) show elevated complaint density.")
+            st.error(f"Personal Verdict: PROCEED WITH CAUTION — Elevated complaints found for your dealbreakers "
+                     f"({', '.join(red_flags)}).")
         elif my_dims:
             st.success("Personal Verdict: NO ELEVATED RISK detected for your profile.")
         else:
-            st.caption("Select your dealbreaker dimensions in the sidebar to view personalized risk matching.")
+            st.caption("Select your dealbreakers in the sidebar to get a personalized warning report.")
 
-        # ---------------- Courtroom mode: forced adversarial verdict ----
-        if st.button("Courtroom Analysis — AI Adversarial Arguments", key=f"court_{appid}"):
+        # ---------------- AI Pros & Cons Analysis ----
+        if st.button("AI Pros & Cons Analysis", key=f"court_{appid}"):
             pros = vsearch(appid, "amazing experience totally worth it best game recommended", 10, polarity=True)
             cons = vsearch(appid, "broken disappointed waste of money refund problems", 10, polarity=False)
             if pros.empty and cons.empty:
-                st.info("This game is not in the semantic vector index.")
+                st.info("No indexed review evidence found for this game.")
             else:
                 ev_p = "\n".join(f"- {t[:200]}" for t in pros["text"].head(8))
                 ev_c = "\n".join(f"- {t[:200]}" for t in cons["text"].head(8))
@@ -477,14 +473,14 @@ with tab_buy:
                                              location=os.environ.get("VERTEX_LOCATION", "global")))
                     verdictmd = _gc.models.generate_content(
                         model=GEMINI_MODEL,
-                        contents=(f"You are a courtroom analyst evaluating '{row.game}'. Real player evidence:\n"
-                                  f"DEFENSE EVIDENCE (Positive Reviews):\n{ev_p}\n"
-                                  f"PROSECUTION EVIDENCE (Negative Reviews):\n{ev_c}\n"
-                                  "Write in markdown: '#### Defense Argument (Case for Purchase)' (3 bullets), "
-                                  "'#### Prosecution Argument (Case Against)' (3 bullets), "
-                                  "'#### Final Judicial Ruling' (2 sentences, decisive advice). Ground every claim in evidence.")).text
+                        contents=(f"Analyze player reviews for '{row.game}'. Evidence:\n"
+                                  f"POSITIVE REVIEWS:\n{ev_p}\n"
+                                  f"NEGATIVE REVIEWS:\n{ev_c}\n"
+                                  "Write in simple English markdown: '#### Reasons to Buy (Pros)' (3 clear bullet points), "
+                                  "'#### Reasons to Skip (Cons)' (3 clear bullet points), "
+                                  "'#### Final AI Verdict' (2 simple sentences summarizing who should buy).")).text
                     st.markdown(verdictmd)
-                    st.caption("Adversarial Analysis: Forces the LLM to argue both defense and prosecution positions using real retrieved player reviews.")
+                    st.caption("AI evaluates both happy and unhappy player reviews to give a balanced verdict.")
                 except Exception as e:
                     st.error(f"Gemini service unavailable: {e}")
 
@@ -506,8 +502,8 @@ with tab_buy:
 # ---------------------------------------------------------------- Bombing Alert
 with tab_alert:
     c1, c2 = st.columns(2)
-    zmin = c1.slider("Minimum Z-Score Severity", 3.0, 10.0, 3.0, 0.5)
-    minn = c2.slider("Min Daily Reviews Threshold", 3, 200, 30, 1)
+    zmin = c1.slider("Alert Sensitivity Level", 3.0, 10.0, 3.0, 0.5)
+    minn = c2.slider("Minimum Daily Reviews", 3, 200, 30, 1)
     try:
         alerts = q(f"""
             WITH ep AS (
@@ -541,10 +537,10 @@ with tab_alert:
             GROUP BY appid
             ORDER BY latest_day DESC, peak_daily_reviews DESC
             LIMIT 500""", z=float(zmin), minn=int(minn))
-    st.caption(f"Identified {len(alerts)} review bombing episodes. Criterion: Negative review rate Z > {zmin} AND daily volume > 2x baseline. AI Attribution uses distinctive TF-IDF keyword extraction summarized by Gemini.")
+    st.caption(f"Found {len(alerts)} review bombing events. Identifies sudden spikes in negative reviews and uses AI to summarize why players were upset.")
     st.dataframe(alerts, use_container_width=True, height=480,
                  column_config={"why_bombed_ai": st.column_config.TextColumn(
-                     "AI Attribution Summary", width="large")})
+                     "Why Players Are Upset (AI Summary)", width="large")})
 
 # ---------------------------------------------------------------- Ask Gemini
 SCHEMA_PROMPT = f"""You translate questions about Steam game reviews into BigQuery Standard SQL.
@@ -562,12 +558,10 @@ Tables:
    appid INT64, game STRING, date INT64 (epoch nanoseconds, same conversion as above),
    n INT64 (reviews that day), neg_rate FLOAT64 (0-1), z FLOAT64 (severity z-score),
    base_neg_rate FLOAT64 (0-1, 30-day baseline).
-4. {T('benchmark_results')} — CPU vs GPU pipeline timings.
-   run_ts STRING, mode STRING ('cpu' or 'gpu'), stage STRING, seconds FLOAT64, rows INT64.
-5. {T('v_daily_all')} — PREFERRED for any date logic: one row per game per day,
+4. {T('v_daily_all')} — PREFERRED for any date logic: one row per game per day,
    2023 snapshot MERGED with the nightly Steam sync. appid INT64, day DATE,
    n INT64, pos INT64, w_sum FLOAT64, wv_sum FLOAT64.
-6. {T('v_scores_live')} — evergreen scores anchored to CURRENT_DATE():
+5. {T('v_scores_live')} — evergreen scores anchored to CURRENT_DATE():
    appid INT64, game STRING, score_live FLOAT64 (0-100), raw_pos_rate FLOAT64,
    recent_n_live INT64, recent_pos_rate_live FLOAT64, n_reviews_total INT64,
    last_review_day DATE.
@@ -613,9 +607,9 @@ def run_sql(sql: str) -> pd.DataFrame:
 
 
 with tab_ask:
-    ask_mode = st.radio("Mode", ["SQL Analytics", "RAG Semantic Q&A"],
+    ask_mode = st.radio("Mode", ["Explore Data Insights", "Ask About Reviews"],
                         horizontal=True, label_visibility="collapsed")
-    if ask_mode == "RAG Semantic Q&A":
+    if ask_mode == "Ask About Reviews":
         names_rag = q(f"""SELECT appid, game FROM {T('game_scores')}
                           WHERE game IS NOT NULL ORDER BY n_reviews DESC LIMIT 300""")
         rag_pick = st.selectbox("Game", (names_rag["game"] + "  (#" +
@@ -647,19 +641,19 @@ with tab_ask:
                                   f"Max 120 words.\nREVIEWS:\n{numbered}\n"
                                   f"QUESTION: {rag_q}\nANSWER:")).text
                     st.markdown(ans)
-                    with st.expander("Evidence (retrieved via BigQuery VECTOR_SEARCH)"):
+                    with st.expander("Evidence Reviews"):
                         st.text(numbered)
-                    st.caption("Grounded RAG: Query embedded in-process → BigQuery VECTOR_SEARCH → Gemini answers only from evidence.")
+                    st.caption("AI searches real player reviews and answers using direct player feedback.")
                 except Exception as e:
                     st.error(f"Gemini unavailable: {e}")
         elif rag_pick and rag_q:
             st.warning("Ask-Gemini session limit (5) reached — refresh for a new session.")
-    if ask_mode == "SQL Analytics":
-        st.caption(f"Ask in natural English — Gemini ({GEMINI_MODEL}) generates read-only BigQuery SQL over aggregated tables:")
+    if ask_mode == "Explore Data Insights":
+        st.caption(f"Ask questions in plain English — Gemini ({GEMINI_MODEL}) writes BigQuery queries to answer:")
         examples = [
-            "Top 10 games by purchase confidence with at least 100k reviews",
+            "Top 10 games by recommendation score with at least 100k reviews",
             "Which 5 games had the most review-bombing days, and when was the latest?",
-            "Show games with recent positive rate higher than all-time average",
+            "Show games with recent rating higher than overall average",
         ]
         cols = st.columns(len(examples))
         for col, ex in zip(cols, examples):
@@ -679,7 +673,7 @@ with tab_ask:
                 st.error(f"Gemini is not available: {e}")
             else:
                 err = guard_sql(sql)
-                with st.expander("Generated SQL", expanded=False):
+                with st.expander("Generated SQL Query", expanded=False):
                     st.code(sql, language="sql")
                 if err:
                     st.error(err)
@@ -690,13 +684,12 @@ with tab_ask:
                         st.error(f"BigQuery rejected the query: {e}")
                     else:
                         st.dataframe(out, use_container_width=True)
-                        st.caption(f"{len(out)} rows · query generated by {GEMINI_MODEL}, "
-                                   "validated as read-only, capped at 1 GB scanned.")
+                        st.caption(f"{len(out)} rows · query generated by {GEMINI_MODEL}.")
 
 # ---------------------------------------------------------------- Player Composition
 with tab_comp:
-    st.subheader("Reviewer Composition & Astroturf Screening Radar")
-    st.caption("Acquisition channel X-ray across 32,793 games in the snapshot — Direct Steam Purchase %, Free Key / Gift %, Early Access Review %.")
+    st.subheader("Player Ownership & Review Quality")
+    st.caption("Breakdown of player acquisition channels across 32,793 games — Direct Purchase %, Free / Gift Keys %, and Early Access Reviews %.")
     try:
         comp_df = q(f"""
             SELECT s.game, s.appid, s.n_reviews_total AS n_reviews,
@@ -713,9 +706,9 @@ with tab_comp:
             height=420,
             column_config={
                 "game": st.column_config.TextColumn("Game Title", width="medium"),
-                "purchase_pct": st.column_config.NumberColumn("Direct Steam Purchase %", format="%.1f%%"),
-                "free_pct": st.column_config.NumberColumn("Free Key / Gift % (Astroturf Risk)", format="%.1f%%"),
-                "ea_pct": st.column_config.NumberColumn("Early Access Review %", format="%.1f%%"),
+                "purchase_pct": st.column_config.NumberColumn("Direct Purchase %", format="%.1f%%"),
+                "free_pct": st.column_config.NumberColumn("Free / Gift Keys %", format="%.1f%%"),
+                "ea_pct": st.column_config.NumberColumn("Early Access %", format="%.1f%%"),
                 "n_reviews": st.column_config.NumberColumn("Total Reviews", format="%d"),
             }
         )
@@ -723,6 +716,4 @@ with tab_comp:
         st.info(f"Player composition data unavailable ({e}).")
 
 st.divider()
-st.caption("Data: 114M-review Kaggle snapshot + nightly Steam Web API sync | "
-           "Architecture: GCS + BigQuery + Cloud Run + Cloud Scheduler/Jobs + RAPIDS on L4 + Gemini (Vertex AI) | "
-           "App only queries aggregated tables, latency < 2s")
+st.caption("Data: 114M Steam Review Dataset + Live Steam Web API Sync | Powered by GCP BigQuery, Cloud Run & Gemini AI")
