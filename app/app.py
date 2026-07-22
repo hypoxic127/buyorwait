@@ -621,25 +621,6 @@ with tab_comp:
     except Exception as e:
         st.info(f"Player composition data unavailable ({e}).")
 
-    with st.expander("⚡ GPU Infrastructure Benchmark & Timings (NVIDIA L4)"):
-        bm = q(f"SELECT * FROM {T('benchmark_results')}")
-        if bm.empty:
-            st.info("No benchmark data yet.")
-        else:
-            last = (bm.sort_values("run_ts").groupby(["mode", "stage"], as_index=False).last())
-            pv = last.pivot(index="stage", columns="mode", values="seconds")
-            if {"cpu", "gpu"} <= set(pv.columns):
-                pv["speedup"] = (pv["cpu"] / pv["gpu"]).round(1)
-            order = ["read_parquet", "clean_cast", "daily_groupby",
-                     "weighted_score", "bomb_detect", "write_outputs", "end_to_end"]
-            pv = pv.reindex([s for s in order if s in pv.index])
-            rows_note = int(last["rows"].max())
-            st.subheader(f"Same GCE g2-standard-8 instance: 8 vCPUs (pandas) vs NVIDIA L4 GPU (cudf.pandas)")
-            st.caption(f"Data scale: {rows_note:,} rows; dual-run on the same machine, zero code change (`python -m cudf.pandas`).")
-            st.dataframe(pv.style.format("{:.2f}", subset=[c for c in ("cpu", "gpu") if c in pv.columns]),
-                         use_container_width=True)
-            st.bar_chart(pv[[c for c in ("cpu", "gpu") if c in pv.columns]], height=300)
-
 st.divider()
 st.caption("Data: 114M-review Kaggle snapshot + nightly Steam Web API sync (all public Steam data) | "
            "Architecture: GCS + BigQuery + Cloud Run + Cloud Scheduler/Jobs + RAPIDS on L4 + Gemini (Vertex AI) | "
