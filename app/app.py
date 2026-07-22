@@ -628,8 +628,8 @@ with tab_buy:
 # ---------------------------------------------------------------- Bombing Alert
 with tab_alert:
     c1, c2 = st.columns(2)
-    zmin = c1.slider("Alert Sensitivity Level", 3.0, 10.0, 3.0, 0.5)
-    minn = c2.slider("Minimum Daily Reviews", 3, 200, 30, 1)
+    zmin = c1.slider("Alert Sensitivity Level", 1.0, 10.0, 3.0, 0.5)
+    minn = c2.slider("Minimum Daily Reviews", 1, 200, 30, 1)
     try:
         alerts = q(f"""
             WITH ep AS (
