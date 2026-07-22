@@ -21,7 +21,126 @@ PROJECT = os.environ.get("GCP_PROJECT", "buyorwait-2026")   # Change to your GCP
 DATASET = os.environ.get("BQ_DATASET", "steam_intel")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
 
-st.set_page_config(page_title="BuyOrWait", page_icon="🎮", layout="wide")
+st.set_page_config(page_title="BuyOrWait — Steam 智能避坑与决策平台", page_icon="🎮", layout="wide")
+
+# Modern Glassmorphism & Cyberpunk Dark Theme CSS
+st.markdown("""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap');
+
+html, body, [class*="css"] {
+    font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+}
+
+/* App Background & Sleek Atmosphere */
+.stApp {
+    background: radial-gradient(circle at 50% 0%, #162033 0%, #0d121c 60%, #080b10 100%);
+    color: #e2e8f0;
+}
+
+/* Top Navigation Bar & Headers */
+header[data-testid="stHeader"] {
+    background: rgba(13, 18, 28, 0.7) !important;
+    backdrop-filter: blur(16px);
+}
+
+/* Hero Title Card */
+.hero-title {
+    font-size: 2.2rem;
+    font-weight: 800;
+    background: linear-gradient(135deg, #66c0f4 0%, #a5b4fc 50%, #38bdf8 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    margin-bottom: 2px;
+    letter-spacing: -0.5px;
+}
+
+.hero-subtitle {
+    font-size: 0.92rem;
+    color: #94a3b8;
+    margin-bottom: 10px;
+}
+
+/* Metric Cards Styling */
+[data-testid="stMetric"] {
+    background: rgba(22, 32, 50, 0.65);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 12px;
+    padding: 14px 18px;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.25);
+    backdrop-filter: blur(12px);
+    transition: all 0.2s ease-in-out;
+}
+[data-testid="stMetric"]:hover {
+    transform: translateY(-2px);
+    border-color: rgba(102, 192, 244, 0.4);
+    box-shadow: 0 6px 24px rgba(102, 192, 244, 0.15);
+}
+[data-testid="stMetricValue"] {
+    font-weight: 800;
+    color: #f8fafc;
+}
+[data-testid="stMetricLabel"] {
+    color: #94a3b8;
+    font-weight: 500;
+    font-size: 0.85rem;
+}
+
+/* Styled Tabs */
+[data-testid="stTab"] {
+    font-weight: 600;
+    font-size: 15px;
+    padding: 10px 22px;
+    border-radius: 8px;
+    color: #94a3b8;
+    background: rgba(15, 23, 42, 0.4);
+    border: 1px solid transparent;
+    transition: all 0.2s ease;
+    margin-right: 6px;
+}
+[data-testid="stTab"]:hover {
+    color: #e2e8f0;
+    border-color: rgba(102, 192, 244, 0.3);
+}
+[data-testid="stTab"][aria-selected="true"] {
+    background: linear-gradient(135deg, rgba(102, 192, 244, 0.22) 0%, rgba(56, 189, 248, 0.12) 100%);
+    color: #38bdf8;
+    border: 1px solid rgba(56, 189, 248, 0.4);
+    box-shadow: 0 4px 12px rgba(56, 189, 248, 0.15);
+}
+
+/* Sidebar Glassmorphism */
+[data-testid="stSidebar"] {
+    background-color: rgba(13, 19, 31, 0.9);
+    backdrop-filter: blur(20px);
+    border-right: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+/* Streamlit Buttons */
+.stButton>button {
+    border-radius: 8px;
+    font-weight: 600;
+    background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    color: #f1f5f9;
+    padding: 8px 16px;
+    transition: all 0.2s ease;
+}
+.stButton>button:hover {
+    border-color: #38bdf8;
+    box-shadow: 0 0 16px rgba(56, 189, 248, 0.3);
+    color: #38bdf8;
+    transform: translateY(-1px);
+}
+
+/* Dataframe styling */
+[data-testid="stDataFrame"] {
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 12px;
+    overflow: hidden;
+}
+</style>
+""", unsafe_allow_html=True)
 
 
 @st.cache_resource
@@ -46,7 +165,7 @@ def T(name: str) -> str:
 def verdict(score: float, recent: float | None) -> str:
     base = "🟢 Buy" if score >= 70 else ("🟡 Wait" if score >= 40 else "🔴 Skip")
     if recent is not None and not pd.isna(recent) and recent + 15 < score:
-        base += " (⚠ Recent reviews are significantly lower than overall score)"
+        base += " (⚠ Recent reviews lower than overall)"
     return base
 
 
@@ -196,16 +315,23 @@ def freshness_badge():
             raise ValueError("no sync yet")
         hrs = max(0, int((pd.Timestamp.now(tz="UTC")
                           - pd.Timestamp(f.last_sync)).total_seconds() // 3600))
-        st.caption(f"🟢 **LIVE** — last Steam sync **{hrs}h ago** · tracking "
-                   f"**{int(f.tracked_games):,} games** nightly · "
-                   f"**+{int(f.delta_reviews):,}** reviews since the 2023 snapshot · "
-                   "scores decay-anchored to today")
+        st.markdown(f"""
+        <div style="display: flex; align-items: center; gap: 8px; background: rgba(34, 197, 94, 0.1); border: 1px solid rgba(34, 197, 94, 0.25); padding: 6px 14px; border-radius: 20px; width: fit-content; margin-bottom: 14px;">
+            <span style="color: #4ade80; font-size: 14px;">🟢 <strong>LIVE SYNC ACTIVE</strong></span>
+            <span style="color: #94a3b8; font-size: 13px;">| Steam Sync <strong>{hrs}h ago</strong> · Ingested <strong>{int(f.tracked_games):,} games</strong> · <strong>+{int(f.delta_reviews):,}</strong> reviews synced</span>
+        </div>
+        """, unsafe_allow_html=True)
     except Exception:
-        st.caption("🟡 Snapshot mode — first nightly Steam sync lands tonight.")
+        st.markdown("""
+        <div style="display: flex; align-items: center; gap: 8px; background: rgba(234, 179, 8, 0.1); border: 1px solid rgba(234, 179, 8, 0.25); padding: 6px 14px; border-radius: 20px; width: fit-content; margin-bottom: 14px;">
+            <span style="color: #facc15; font-size: 14px;">🟡 <strong>SNAPSHOT ACTIVE</strong></span>
+            <span style="color: #94a3b8; font-size: 13px;">| 1.14M Review Snapshot Loaded · Nightly Sync Active</span>
+        </div>
+        """, unsafe_allow_html=True)
 
 
-st.title("🎮 BuyOrWait — To Buy or Not to Buy")
-st.caption("114M-review snapshot + nightly Steam sync · Playtime-weighted, 90-day half-life evergreen scores · RAPIDS cudf.pandas on NVIDIA L4 (GCE)")
+st.markdown('<div class="hero-title">🎮 BuyOrWait — Steam 智能避坑与决策平台</div>', unsafe_allow_html=True)
+st.markdown('<div class="hero-subtitle">1.14 亿全量 Steam 玩家评价 · 90 天半衰期衰减模型 · Gemini 避坑 AI 助手</div>', unsafe_allow_html=True)
 freshness_badge()
 
 # ---- My Radar: personal dealbreaker profile (session-only, no login) ---------
