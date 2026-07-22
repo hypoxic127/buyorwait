@@ -652,10 +652,13 @@ with tab_alert:
               GROUP BY appid
             )
             SELECT ep.game,
-                   COALESCE(
-                     c.summary,
-                     IF(c.terms IS NOT NULL AND c.terms != '', CONCAT('Top complaint terms: ', c.terms), NULL),
-                     CONCAT('Elevated negative review surge (', ep.peak_neg_pct, '% neg vs ', ep.baseline_neg_pct, '% baseline)')
+                   REGEXP_REPLACE(
+                     COALESCE(
+                       c.summary,
+                       IF(c.terms IS NOT NULL AND c.terms != '', CONCAT('Top complaint terms: ', c.terms), NULL),
+                       CONCAT('Elevated negative review surge (', ep.peak_neg_pct, '% neg vs ', ep.baseline_neg_pct, '% baseline)')
+                     ),
+                     r'^(?:\*\*|\*|#)*\s*(?:SUMMARY|Summary|summary)\s*:\s*(?:\*\*|\*)*\s*', ''
                    ) AS why_bombed_ai,
                    ep.first_day, ep.latest_day,
                    ep.alert_days, ep.peak_daily_reviews, ep.peak_neg_pct,
