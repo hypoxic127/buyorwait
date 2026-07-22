@@ -12,6 +12,7 @@ import os
 import re
 from datetime import datetime, timezone
 
+import altair as alt          # bundled with Streamlit — no extra dependency
 import pandas as pd
 import requests
 import streamlit as st
@@ -79,6 +80,9 @@ header[data-testid="stHeader"] {
 [data-testid="stMetricValue"] {
     font-weight: 800;
     color: #f8fafc;
+    /* Slightly smaller than default so 4-up KPI rows fit values like a full date
+       without ellipsizing. */
+    font-size: 1.75rem;
 }
 [data-testid="stMetricLabel"] {
     color: #94a3b8;
@@ -335,16 +339,6 @@ def vsearch(appid: int, query: str, k: int = 20, polarity: bool | None = None) -
         return pd.DataFrame()
 
 
-@st.cache_data(ttl=600, show_spinner=False)
-def game_vec_total(appid: int) -> int:
-    """Total indexed review vectors for a game — the denominator for friction prevalence."""
-    try:
-        return int(q(f"SELECT COUNT(*) AS c FROM {T('review_vectors')} WHERE appid = @a",
-                     a=int(appid)).iloc[0].c)
-    except Exception:
-        return 0
-
-
 RADAR_DIMS = {
     "Monetization & MTX": "microtransactions pay to win overpriced cash grab battle pass",
     "Low-End PC Performance": "fps drops stuttering lag poor optimization low end pc",
@@ -355,25 +349,108 @@ RADAR_DIMS = {
     "Steam Deck & Controller": "steam deck controller support broken keyboard only",
 }
 
+# Canonical polarity probes — shared by the radar snippets and the AI analysis so both
+# hit the same embedding + query cache instead of paying for near-identical variants.
+PRAISE_Q = "amazing experience totally worth it best game highly recommend"
+CRITIC_Q = "broken disappointed waste of money refund problems"
 
-def radar_level(hits: pd.DataFrame, total_reviews: int) -> tuple[str, int]:
+
+def snippet(text: str, limit: int = 180) -> str:
+    """Collapse review whitespace so a quote renders on one clean blockquote line."""
+    return " ".join(str(text).split())[:limit]
+
+
+# Chart tokens. Each chart carries a single series, so identity never rides on colour
+# alone and no legend is needed — the title names the series. Text keeps ink tokens.
+CHART_ACCENT = "#38bdf8"   # primary signal (sentiment)
+CHART_MUTED = "#64748b"    # supporting context (volume)
+CHART_INK = "#94a3b8"      # axis/label ink, matches the app's muted text
+
+
+def chart_theme(chart):
+    """Recessive axes and grid over the app's dark surface (dark mode is chosen here,
+    not an automatic flip of a light theme)."""
+    return (chart
+            .properties(background="transparent")
+            .configure_view(strokeWidth=0)
+            .configure_axis(labelColor=CHART_INK, titleColor=CHART_INK,
+                            labelFontSize=11, titleFontSize=11,
+                            gridColor="rgba(255,255,255,0.06)",
+                            domainColor="rgba(255,255,255,0.15)",
+                            tickColor="rgba(255,255,255,0.15)"))
+
+
+# Prevalence thresholds — calibrated against high- vs low-friction reference games.
+STRONG_DIST = 0.30      # cosine distance below which a review is genuinely on-topic
+HIGH_SHARE = 0.03       # >=3% of a game's reviews on-topic-negative -> High Risk
+MODERATE_SHARE = 0.01   # >=1% -> Moderate Risk
+
+
+def radar_level(strong: int, total_reviews: int) -> str:
     """Grade a friction dimension by PREVALENCE rather than a raw match count.
 
-    We take the share of the game's sampled reviews that are *strongly* on-topic
-    negatives (cosine distance < 0.30 — a genuine match, not a loose one), normalized
-    by the game's total review sample. A loose <0.45 count saturates (almost every game
-    hits it for every topic); prevalence-at-0.30 separates a game's real problems from
-    generic noise. Thresholds calibrated against high- vs low-friction reference games.
+    `strong` is the number of the game's negative reviews that are genuinely on-topic
+    (cosine distance < STRONG_DIST), normalized by the game's total review sample. A
+    loose distance threshold saturates — almost every game hits it for every topic —
+    whereas prevalence separates a game's real problems from generic noise.
     """
-    if not len(hits) or total_reviews <= 0:
-        return ("Low Risk", 0)
-    strong = int((hits["distance"] < 0.30).sum())
+    if strong <= 0 or total_reviews <= 0:
+        return "Low Risk"
     share = strong / total_reviews
-    if share >= 0.03:
-        return ("High Risk", strong)
-    if share >= 0.01:
-        return ("Moderate Risk", strong)
-    return ("Low Risk", strong)
+    if share >= HIGH_SHARE:
+        return "High Risk"
+    if share >= MODERATE_SHARE:
+        return "Moderate Risk"
+    return "Low Risk"
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def friction_radar(appid: int) -> dict:
+    """Score every friction dimension for one game in a SINGLE BigQuery round trip.
+
+    Cross-joins the game's negative reviews against all dimension query vectors at once,
+    giving an exact COUNTIF over the *full* negative set (no top-k truncation) plus the
+    three closest snippets per dimension. Replaces 7 separate VECTOR_SEARCH calls.
+    Returns {dim: {"level", "n", "texts"}}; empty dict when nothing is indexed.
+    """
+    struct_params = [
+        bigquery.StructQueryParameter(
+            None,
+            bigquery.ScalarQueryParameter("dim", "STRING", d),
+            bigquery.ArrayQueryParameter("qv", "FLOAT64", embed_query(query)),
+        )
+        for d, query in RADAR_DIMS.items()
+    ]
+    cfg = bigquery.QueryJobConfig(
+        query_parameters=[bigquery.ArrayQueryParameter("dims", "STRUCT", struct_params),
+                          bigquery.ScalarQueryParameter("a", "INT64", int(appid))],
+        maximum_bytes_billed=3 * 1024 ** 3)
+    sql = f"""
+        WITH neg AS (
+          SELECT text, embedding FROM {T('review_vectors')}
+          WHERE appid = @a AND voted_up = FALSE
+        ),
+        scored AS (
+          SELECT q.dim AS dim, neg.text AS text,
+                 ML.DISTANCE(neg.embedding, q.qv, 'COSINE') AS dist
+          FROM neg CROSS JOIN UNNEST(@dims) AS q
+        )
+        SELECT dim,
+               COUNTIF(dist < {STRONG_DIST}) AS strong,
+               ARRAY_AGG(text ORDER BY dist LIMIT 3) AS texts,
+               (SELECT COUNT(*) FROM {T('review_vectors')} WHERE appid = @a) AS total_vec
+        FROM scored GROUP BY dim"""
+    try:
+        df = _client().query(sql, job_config=cfg).to_dataframe()
+    except Exception:
+        return {}
+    if df.empty:
+        return {}
+    total = int(df.iloc[0].total_vec)
+    return {r.dim: {"level": radar_level(int(r.strong), total),
+                    "n": int(r.strong),
+                    "texts": [str(t) for t in r.texts]}
+            for r in df.itertuples()}
 
 
 def _log_usage(event: str, game: str, appid: int):
@@ -438,13 +515,37 @@ with st.sidebar:
     my_hours = st.slider("Weekly Gaming Hours Budget", 1, 40, 6)
     
     my_dims = st.multiselect("Personal Dealbreaker Filters", list(RADAR_DIMS), default=[])
+    auto_dims = []
     if my_device == "Low-end PC" and "Low-End PC Performance" not in my_dims:
-        my_dims.append("Low-End PC Performance")
+        auto_dims.append("Low-End PC Performance")
     if my_device == "Steam Deck" and "Steam Deck & Controller" not in my_dims:
-        my_dims.append("Steam Deck & Controller")
+        auto_dims.append("Steam Deck & Controller")
+    my_dims += auto_dims
+    if auto_dims:
+        st.caption(f"Added from your hardware choice: {', '.join(auto_dims)}.")
 
 tab_buy, tab_alert, tab_ask, tab_comp = st.tabs(
     ["Person-Game Fit", "Review Bombing & Crowd Noise", "Ask Gemini AI", "Player Ownership"])
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def featured_games(n: int = 5) -> pd.DataFrame:
+    """Popular games that actually have indexed review vectors, so the one-click demos
+    land on a fully-populated radar instead of an empty state."""
+    try:
+        return q(f"""SELECT s.game, s.appid
+                     FROM {T('game_scores')} s
+                     WHERE s.game IS NOT NULL
+                       AND s.appid IN (SELECT DISTINCT appid FROM {T('review_vectors')})
+                     ORDER BY s.n_reviews DESC LIMIT {int(n)}""")
+    except Exception:
+        return pd.DataFrame()
+
+
+def _pick_game(label: str):
+    """on_click callback — runs before the rerun, so writing the selectbox's own state
+    key here is safe (assigning it after the widget is created would raise)."""
+    st.session_state["game_pick"] = label
+
 
 # ---------------------------------------------------------------- Person-Game Fit
 with tab_buy:
@@ -452,11 +553,27 @@ with tab_buy:
                      WHERE game IS NOT NULL ORDER BY n_reviews DESC LIMIT 20000""")
     labels = (names_df["game"] + "  (#" + names_df["appid"].astype(str) + ")").tolist()
     pick = st.selectbox("Select a game to test your personal fit (top 20,000 games)",
-                        labels, index=None,
+                        labels, index=None, key="game_pick",
                         placeholder="e.g., Cyberpunk 2077 / Overwatch 2 / ELDEN RING")
 
     # Inline live-search fallback — visible immediately (no accordion), hidden once a game is picked.
     if not pick:
+        st.markdown("Pick a game and BuyOrWait weighs **your** life rhythm, weekly time budget "
+                    "and hardware against 114M real Steam reviews — then surfaces the friction "
+                    "points that would actually land on you.")
+        feat = featured_games()
+        if not feat.empty:
+            # Only offer games the selectbox actually contains, or setting its state would raise.
+            label_set = set(labels)
+            shots = [(r.game, f"{r.game}  (#{r.appid})", r.appid) for r in feat.itertuples()]
+            shots = [s for s in shots if s[1] in label_set]
+            if shots:
+                st.caption("Fully analysed examples — one click:")
+                for col, (name, label, aid) in zip(st.columns(len(shots)), shots):
+                    # Truncate so a long title can't wrap and break the row's alignment.
+                    col.button(name if len(name) <= 20 else name[:19] + "…",
+                               key=f"feat_{aid}", use_container_width=True,
+                               help=name, on_click=_pick_game, args=(label,))
         st.caption("Not in the list, or released after our 2023 snapshot? Search Steam directly:")
         kw_live = st.text_input("Steam live search", placeholder="e.g., Black Myth: Wukong",
                                 label_visibility="collapsed")
@@ -477,25 +594,22 @@ with tab_buy:
                 live_panel(opts[pick_live], None)
                 st.caption("This game post-dates the main dataset, so its score is fetched directly from live Steam ratings.")
 
+    hit = pd.DataFrame()
     if pick:
         appid = int(pick.rsplit("#", 1)[1].rstrip(")"))
         hit = q(f"SELECT * FROM {T('v_scores_live')} WHERE appid = @a", a=appid)
+        if hit.empty:
+            st.warning("No scored data for this game yet — it may be newer than the scored "
+                       "set. Clear the selection and use the live Steam search instead.")
+
+    if pick and not hit.empty:
         row = hit.iloc[0]
         _log_usage("search", str(row.game), appid)
 
-        # ---- Friction Radar: one vector search per dimension, computed ONCE.
-        #      Red flags are derived from this same pass (no duplicate searches). ----
+        # ---- Friction Radar: all dimensions in ONE round trip.
+        #      Red flags are derived from the same pass (no duplicate searches). ----
         with st.spinner("Profiling player sentiment across friction dimensions..."):
-            total_vec = game_vec_total(appid)
-            radar = {}  # dim -> {"level", "n", "hits"} or None when no indexed reviews
-            for dim, query in RADAR_DIMS.items():
-                # k wide enough that the strong-match (<0.30) count isn't truncated
-                hits = vsearch(appid, query, k=80, polarity=False)
-                if hits.empty:
-                    radar[dim] = None
-                else:
-                    level, strong = radar_level(hits, total_vec)
-                    radar[dim] = {"level": level, "n": strong, "hits": hits}
+            radar = friction_radar(appid)
         red_flags = [d for d in my_dims
                      if radar.get(d) and radar[d]["level"].startswith("High")]
 
@@ -544,11 +658,11 @@ with tab_buy:
 
         # ---- Player Friction Radar: real per-game signal (replaces static filler) ----
         st.subheader("Player Friction Radar")
-        if all(v is None for v in radar.values()):
+        if not radar:
             st.caption("Not enough indexed reviews to profile player friction for this game.")
         else:
             ranked = sorted(
-                [(d, v) for d, v in radar.items() if v is not None],
+                radar.items(),
                 key=lambda kv: {"High Risk": 0, "Moderate Risk": 1, "Low Risk": 2}[kv[1]["level"]])
             chips = "".join(risk_chip(d, v["level"], d in my_dims) for d, v in ranked)
             st.markdown(f'<div style="margin-bottom:8px;">{chips}</div>', unsafe_allow_html=True)
@@ -556,31 +670,30 @@ with tab_buy:
                 st.caption("★ marks the dealbreakers from your profile.")
 
             col_love, col_quit = st.columns(2)
-            praise = vsearch(appid, "amazing experience worth it best game highly recommend",
-                             k=6, polarity=True)
+            praise = vsearch(appid, PRAISE_Q, k=10, polarity=True)
             with col_love:
                 st.markdown("**What fans praise**")
                 if praise.empty:
                     st.caption("No positive review evidence indexed.")
                 else:
                     for t in praise["text"].head(3):
-                        st.markdown(f"> {' '.join(str(t).split())[:180]}")
+                        st.markdown(f"> {snippet(t)}")
             with col_quit:
                 st.markdown("**What critics hit hardest**")
                 top_neg = [v for _, v in ranked if v["level"] != "Low Risk"][:1]
-                neg_texts = top_neg[0]["hits"]["text"].head(3).tolist() if top_neg else []
+                neg_texts = top_neg[0]["texts"][:3] if top_neg else []
                 if not neg_texts:
                     st.caption("No significant friction found in indexed reviews.")
                 else:
                     for t in neg_texts:
-                        st.markdown(f"> {' '.join(str(t).split())[:180]}")
+                        st.markdown(f"> {snippet(t)}")
 
         # ---------------- AI Life-Context Persona Analysis ----
         st.write("")
         if st.button("Generate AI Life-Context Fit Analysis", key=f"court_{appid}",
                      type="primary", use_container_width=True):
-            pros = vsearch(appid, "amazing experience totally worth it best game recommended", 10, polarity=True)
-            cons = vsearch(appid, "broken disappointed waste of money refund problems", 10, polarity=False)
+            pros = vsearch(appid, PRAISE_Q, 10, polarity=True)
+            cons = vsearch(appid, CRITIC_Q, 10, polarity=False)
             if pros.empty and cons.empty:
                 st.info("No indexed review evidence found for this game.")
             else:
@@ -615,10 +728,43 @@ with tab_buy:
             FROM {T('v_daily_all')} WHERE appid = @a ORDER BY day""", a=appid)
         if not daily.empty:
             daily["day"] = pd.to_datetime(daily["day"])
-            daily = daily.set_index("day")
-            daily["Positive Rate (7d rolling avg)"] = daily["pos_rate"].rolling(7, min_periods=1).mean() * 100
-            st.line_chart(daily["Positive Rate (7d rolling avg)"], height=260)
-            st.bar_chart(daily["n"].rename("Daily Review Volume"), height=160)
+            # Reindex to a continuous daily range. The snapshot ends 2023-10-30 while the
+            # nightly sync only covers recent days, so most games have a real multi-year
+            # gap. Without this the line interpolates straight across it and implies data
+            # we don't have; NaN makes Altair break the line instead. Volume is a true 0.
+            daily = daily.set_index("day").sort_index()
+            daily = daily.reindex(pd.date_range(daily.index.min(), daily.index.max(), freq="D"))
+            daily.index.name = "day"
+            daily["pos_pct"] = daily["pos_rate"].rolling(7, min_periods=1).mean() * 100
+            daily["n"] = daily["n"].fillna(0)
+            daily = daily.reset_index()
+
+            st.subheader("Sentiment & Volume Over Time")
+            # Two measures on different scales -> two charts, never a dual y-axis.
+            x_enc = alt.X("day:T", axis=alt.Axis(title=None, format="%Y", tickCount=6))
+            hover = alt.selection_point(fields=["day"], nearest=True,
+                                        on="mouseover", empty=False)
+            tips = [alt.Tooltip("day:T", title="Date"),
+                    alt.Tooltip("pos_pct:Q", title="Positive rate %", format=".1f"),
+                    alt.Tooltip("n:Q", title="Reviews that day", format=",")]
+            base = alt.Chart(daily).encode(x=x_enc)
+            line = base.mark_line(color=CHART_ACCENT, strokeWidth=2).encode(
+                y=alt.Y("pos_pct:Q", scale=alt.Scale(zero=False),
+                        axis=alt.Axis(title="Positive rate (%) · 7-day average")))
+            # Invisible until hovered: gives a crosshair-style readout without ink noise.
+            marks = base.mark_point(color=CHART_ACCENT, size=70, filled=True).encode(
+                y=alt.Y("pos_pct:Q"), tooltip=tips,
+                opacity=alt.condition(hover, alt.value(1), alt.value(0))).add_params(hover)
+            st.altair_chart(chart_theme(alt.layer(line, marks).properties(height=240)),
+                            use_container_width=True, theme=None)
+
+            vol = alt.Chart(daily).mark_bar(color=CHART_MUTED, cornerRadiusEnd=2).encode(
+                x=x_enc, y=alt.Y("n:Q", axis=alt.Axis(title="Reviews per day")),
+                tooltip=tips)
+            st.altair_chart(chart_theme(vol.properties(height=130)),
+                            use_container_width=True, theme=None)
+            st.caption("Reviews up to 2023-10-30 come from the snapshot; later days come from "
+                       "the nightly Steam sync.")
 
         st.divider()
         st.subheader("Live Verification — Steam API")
@@ -631,7 +777,9 @@ with tab_alert:
     zmin = c1.slider("Alert Sensitivity Level", 1.0, 10.0, 3.0, 0.5)
     minn = c2.slider("Minimum Daily Reviews", 1, 200, 30, 1)
     try:
-        alerts = q(f"""
+        # rf-string: the REGEXP_REPLACE pattern below contains \* and \s, which are not
+        # valid Python escapes and warn (and will eventually error) in a plain f-string.
+        alerts = q(rf"""
             WITH ep AS (
               SELECT appid, ANY_VALUE(game) AS game,
                      MIN(day) AS first_day, MAX(day) AS latest_day,
@@ -681,10 +829,34 @@ with tab_alert:
             GROUP BY appid
             ORDER BY latest_day DESC, peak_daily_reviews DESC
             LIMIT 500""", z=float(zmin), minn=int(minn))
-    st.caption(f"Found {len(alerts)} review bombing events. Distinguishes crowd noise from actual game quality drops.")
-    st.dataframe(alerts, use_container_width=True, height=480,
-                 column_config={"why_bombed_ai": st.column_config.TextColumn(
-                     "Why Players Are Upset (AI Summary)", width="large")})
+    if alerts.empty:
+        st.info("No review-bombing events match these filters — try lowering the sensitivity.")
+    else:
+        b1, b2, b3, b4 = st.columns(4)
+        b1.metric("Games Affected", f"{alerts['appid'].nunique():,}")
+        b2.metric("Total Alert Days", f"{int(alerts['alert_days'].sum()):,}")
+        b3.metric("Worst Severity (z)", f"{alerts['peak_z'].max():.1f}")
+        b4.metric("Most Recent Event", str(alerts['latest_day'].max()))
+        st.caption("Sorted by most recent. Severity z compares a day's negative rate against "
+                   "that game's own 30-day baseline, so crowd noise is separated from a real "
+                   "quality drop.")
+        st.dataframe(
+            alerts, use_container_width=True, height=460, hide_index=True,
+            column_order=("game", "why_bombed_ai", "latest_day", "alert_days",
+                          "peak_daily_reviews", "peak_neg_pct", "baseline_neg_pct", "peak_z"),
+            column_config={
+                "game": st.column_config.TextColumn("Game", width="medium"),
+                "why_bombed_ai": st.column_config.TextColumn(
+                    "Why Players Are Upset (AI Summary)", width="large"),
+                "latest_day": st.column_config.DateColumn("Latest Day"),
+                "alert_days": st.column_config.NumberColumn("Alert Days", format="%d"),
+                "peak_daily_reviews": st.column_config.NumberColumn("Peak Daily Reviews", format="%d"),
+                "peak_neg_pct": st.column_config.ProgressColumn(
+                    "Peak Negative", format="%.1f%%", min_value=0, max_value=100),
+                "baseline_neg_pct": st.column_config.ProgressColumn(
+                    "Baseline Negative", format="%.1f%%", min_value=0, max_value=100),
+                "peak_z": st.column_config.NumberColumn("Severity (z)", format="%.1f"),
+            })
 
 # ---------------------------------------------------------------- Ask Gemini
 SCHEMA_PROMPT = f"""You translate questions about Steam game reviews into BigQuery Standard SQL.
@@ -831,9 +1003,21 @@ with tab_ask:
                         st.caption(f"{len(out)} rows · query generated by {GEMINI_MODEL}.")
 
 # ---------------------------------------------------------------- Player Composition
+@st.cache_data(ttl=3600, show_spinner=False)
+def composition_total() -> int:
+    """Row count of the composition table — derived so the caption can't go stale."""
+    try:
+        return int(q(f"SELECT COUNT(*) AS c FROM {T('game_composition')}").iloc[0].c)
+    except Exception:
+        return 0
+
+
 with tab_comp:
     st.subheader("Player Ownership & Review Quality")
-    st.caption("Breakdown of player acquisition channels across 32,793 games — Direct Purchase %, Free / Gift Keys %, and Early Access Reviews %.")
+    _n_comp = composition_total()
+    st.caption("How players acquired each game — Direct Purchase, Free / Gift Keys, and "
+               "Early Access share of reviews"
+               + (f", across {_n_comp:,} games." if _n_comp else "."))
     c_s, _ = st.columns([2, 1])
     search_kw = c_s.text_input("Filter by game title:", placeholder="e.g., Cyberpunk / Elden Ring / Counter-Strike", label_visibility="collapsed")
     try:
@@ -860,12 +1044,17 @@ with tab_comp:
             comp_df,
             use_container_width=True,
             height=480,
+            hide_index=True,
+            column_order=("game", "n_reviews", "purchase_pct", "free_pct", "ea_pct"),
             column_config={
                 "game": st.column_config.TextColumn("Game Title", width="medium"),
-                "purchase_pct": st.column_config.NumberColumn("Direct Purchase %", format="%.1f%%"),
-                "free_pct": st.column_config.NumberColumn("Free / Gift Keys %", format="%.1f%%"),
-                "ea_pct": st.column_config.NumberColumn("Early Access %", format="%.1f%%"),
                 "n_reviews": st.column_config.NumberColumn("Total Reviews", format="%d"),
+                "purchase_pct": st.column_config.ProgressColumn(
+                    "Direct Purchase", format="%.1f%%", min_value=0, max_value=100),
+                "free_pct": st.column_config.ProgressColumn(
+                    "Free / Gift Keys", format="%.1f%%", min_value=0, max_value=100),
+                "ea_pct": st.column_config.ProgressColumn(
+                    "Early Access", format="%.1f%%", min_value=0, max_value=100),
             }
         )
     except Exception as e:
