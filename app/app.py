@@ -834,20 +834,32 @@ with tab_ask:
 with tab_comp:
     st.subheader("Player Ownership & Review Quality")
     st.caption("Breakdown of player acquisition channels across 32,793 games — Direct Purchase %, Free / Gift Keys %, and Early Access Reviews %.")
+    c_s, _ = st.columns([2, 1])
+    search_kw = c_s.text_input("Filter by game title:", placeholder="e.g., Cyberpunk / Elden Ring / Counter-Strike", label_visibility="collapsed")
     try:
-        comp_df = q(f"""
-            SELECT s.game, s.appid, s.n_reviews_total AS n_reviews,
-                   c.purchase_pct, c.free_pct, c.ea_pct
-            FROM {T('game_composition')} c
-            JOIN {T('v_scores_live')} s ON c.appid = s.appid
-            WHERE s.n_reviews_total > 500
-            ORDER BY s.n_reviews_total DESC
-            LIMIT 500
-        """)
+        if search_kw:
+            comp_df = q(f"""
+                SELECT s.game, s.appid, s.n_reviews_total AS n_reviews,
+                       c.purchase_pct, c.free_pct, c.ea_pct
+                FROM {T('game_composition')} c
+                JOIN {T('v_scores_live')} s ON c.appid = s.appid
+                WHERE LOWER(s.game) LIKE @kw
+                ORDER BY s.n_reviews_total DESC
+                LIMIT 2000
+            """, kw=f"%{search_kw.lower()}%")
+        else:
+            comp_df = q(f"""
+                SELECT s.game, s.appid, s.n_reviews_total AS n_reviews,
+                       c.purchase_pct, c.free_pct, c.ea_pct
+                FROM {T('game_composition')} c
+                JOIN {T('v_scores_live')} s ON c.appid = s.appid
+                ORDER BY s.n_reviews_total DESC
+                LIMIT 10000
+            """)
         st.dataframe(
             comp_df,
             use_container_width=True,
-            height=420,
+            height=480,
             column_config={
                 "game": st.column_config.TextColumn("Game Title", width="medium"),
                 "purchase_pct": st.column_config.NumberColumn("Direct Purchase %", format="%.1f%%"),
