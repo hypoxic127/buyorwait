@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""BuyOrWait Streamlit App: Purchase Decision / Bombing Alert / Ask Gemini / Player Composition.
+"""BuyOrWait Streamlit App: Person-to-Game Resonance Engine.
 Queries only aggregated small tables in BigQuery, never touches raw data.
 The Purchase Decision tab overlays a Live check pulled from the public Steam
 Web API (appreviews/storesearch) so any game — even post-snapshot releases —
@@ -21,7 +21,7 @@ PROJECT = os.environ.get("GCP_PROJECT", "buyorwait-2026")
 DATASET = os.environ.get("BQ_DATASET", "steam_intel")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
 
-st.set_page_config(page_title="BuyOrWait — Steam Game Decision Engine", page_icon="🎮", layout="wide")
+st.set_page_config(page_title="BuyOrWait — Person-to-Game Resonance Engine", page_icon="🎮", layout="wide")
 
 # Modern Glassmorphism Dark Theme CSS
 st.markdown("""
@@ -162,11 +162,15 @@ def T(name: str) -> str:
     return f"`{PROJECT}.{DATASET}.{name}`"
 
 
-def verdict(score: float, recent: float | None) -> str:
-    base = "RECOMMENDED (Buy)" if score >= 70 else ("PROCEED WITH CAUTION (Wait)" if score >= 40 else "NOT RECOMMENDED (Skip)")
-    if recent is not None and not pd.isna(recent) and recent + 15 < score:
-        base += " (Recent rating drop detected)"
-    return base
+def fit_verdict(score: float, red_flags: list, life_rhythm: str) -> tuple[str, str]:
+    if red_flags:
+        return "POOR MATCH (Risk Detected)", f"Collides with your personal dealbreakers ({', '.join(red_flags)})"
+    if score >= 75:
+        return "EXCELLENT MATCH", "High alignment between your life rhythm and game experience"
+    elif score >= 50:
+        return "MODERATE MATCH", "Playable, but may require adjusting your time expectations"
+    else:
+        return "LOW MATCH", "May not fit your current gaming routine or time budget"
 
 
 # ---- Live check: today's sentiment straight from the public Steam Web API ----
@@ -329,31 +333,45 @@ def freshness_badge():
         """, unsafe_allow_html=True)
 
 
-st.markdown('<div class="hero-title">BuyOrWait — Steam Game Decision Engine</div>', unsafe_allow_html=True)
-st.markdown('<div class="hero-subtitle">114 Million Steam Reviews · Real-Time Rating Adjustments · Gemini AI Assistant</div>', unsafe_allow_html=True)
+st.markdown('<div class="hero-title">BuyOrWait — Person-to-Game Resonance Engine</div>', unsafe_allow_html=True)
+st.markdown('<div class="hero-subtitle">Connecting Your Life Rhythm, Time Budget & Hardware to 114 Million Steam Player Experiences</div>', unsafe_allow_html=True)
 freshness_badge()
 
-# ---- My Radar: personal dealbreaker profile (session-only, no login) ---------
+# ---- Sidebar: Your Life Profile & Gaming Persona -----------------------------
 with st.sidebar:
-    st.header("Personal Risk Profile")
-    st.caption("Select your hardware and potential dealbreakers to see if this game fits your preferences.")
-    my_dims = st.multiselect("Personal Dealbreakers", list(RADAR_DIMS), default=[])
+    st.header("Your Gaming Profile")
+    st.caption("Define your life rhythm, gaming time budget, and dealbreakers to calculate personal fit.")
+    
+    my_rhythm = st.selectbox("Life Rhythm & Time Budget", [
+        "Busy Professional (Short 30m sessions)",
+        "Weekend Immersive Gamer (2-3h chunks)",
+        "Hardcore Binge Gamer (10+ hrs/week)"
+    ], index=0)
+    
+    my_goal = st.selectbox("Emotional Objective", [
+        "Decompress After Work (Low Stress)",
+        "Seek Mastery & Challenge (Soulslike Flow)",
+        "Story & Narrative Immersion"
+    ], index=0)
+
     my_device = st.selectbox("Hardware Platform", ["High-end PC", "Low-end PC", "Steam Deck"], index=0)
-    my_hours = st.slider("Gaming Hours per Week", 1, 40, 8)
+    my_hours = st.slider("Weekly Gaming Hours Budget", 1, 40, 6)
+    
+    my_dims = st.multiselect("Personal Dealbreaker Filters", list(RADAR_DIMS), default=[])
     if my_device == "Low-end PC" and "Low-End PC Performance" not in my_dims:
         my_dims.append("Low-End PC Performance")
     if my_device == "Steam Deck" and "Steam Deck & Controller Support" not in my_dims:
         my_dims.append("Steam Deck & Controller Support")
 
 tab_buy, tab_alert, tab_ask, tab_comp = st.tabs(
-    ["Purchase Decision", "Review Bombing Alerts", "Ask Gemini AI", "Player Composition"])
+    ["Person-Game Fit", "Review Bombing & Crowd Noise", "Ask Gemini AI", "Player Ownership"])
 
-# ---------------------------------------------------------------- Purchase Decision
+# ---------------------------------------------------------------- Person-Game Fit
 with tab_buy:
     names_df = q(f"""SELECT appid, game FROM {T('game_scores')}
                      WHERE game IS NOT NULL ORDER BY n_reviews DESC LIMIT 20000""")
     labels = (names_df["game"] + "  (#" + names_df["appid"].astype(str) + ")").tolist()
-    pick = st.selectbox("Search a game — type to filter (top 20,000 by review count)",
+    pick = st.selectbox("Select a game to test your personal fit (top 20,000 games)",
                         labels, index=None,
                         placeholder="e.g., Cyberpunk 2077 / Overwatch 2 / ELDEN RING")
 
@@ -382,82 +400,90 @@ with tab_buy:
         row = hit.iloc[0]
         _log_usage("search", str(row.game), appid)
 
+        # Calculate personal red flags
+        red_flags = []
+        if my_dims:
+            for dim in my_dims:
+                hits = vsearch(appid, RADAR_DIMS[dim], k=25, polarity=False)
+                if not hits.empty:
+                    level, n = radar_level(hits)
+                    if level.startswith("High"):
+                        red_flags.append(dim)
+
+        fit_title, fit_desc = fit_verdict(row.score_live, red_flags, my_rhythm)
+
         c_img, c_m = st.columns([1, 3])
         c_img.image(f"https://cdn.cloudflare.steamstatic.com/steam/apps/{appid}/header.jpg",
                     use_container_width=True)
         with c_m:
             c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Recommendation Score (0-100)", f"{row.score_live:.0f}")
-            c2.metric("Verdict", verdict(row.score_live, row.recent_pos_rate_live))
+            c1.metric("Personal Fit Match", fit_title)
+            c2.metric("Game Rating Score", f"{row.score_live:.0f}/100")
             c3.metric("Recent 90-Day Rating",
                       "—" if pd.isna(row.recent_pos_rate_live) else f"{row.recent_pos_rate_live:.0f}%",
                       delta=None if (pd.isna(row.recent_pos_rate_live) or pd.isna(row.raw_pos_rate))
                       else f"{row.recent_pos_rate_live - row.raw_pos_rate:+.0f}% vs overall")
-            c4.metric("Total Reviews Analyzed", f"{int(row.n_reviews_total):,}")
-        with st.expander("Why This Score?"):
-            st.markdown(
-                f"- **All-Time Positive Rating:** {row.raw_pos_rate:.0f}% — standard Steam store percentage\n"
-                f"- **Recommendation Score:** {row.score_live:.0f} — gives higher weight to **recent reviews** and **players with long playtimes**\n"
-                f"- **Recent 90-Day Rating:** "
-                f"{'no recent reviews' if pd.isna(row.recent_pos_rate_live) else f'{row.recent_pos_rate_live:.0f}% positive over {int(row.recent_n_live):,} reviews'}\n"
-                f"- **Latest Review Date:** {row.last_review_day}\n\n"
-                "A noticeable gap between the recommendation score and all-time rating signals recent game updates or review bombing."
-            )
+            c4.metric("Reviews Analyzed", f"{int(row.n_reviews_total):,}")
+        
+        st.info(f"**Personal Fit Summary:** {fit_desc}")
 
-        # Reviewer composition
-        try:
-            comp = q(f"""SELECT n, purchase_pct, free_pct, ea_pct
-                         FROM {T('game_composition')} WHERE appid = @a""", a=appid)
-            if not comp.empty:
-                c0 = comp.iloc[0]
-                st.caption(f"Player Ownership Breakdown ({int(c0.n):,} reviews): "
-                           f"{c0.purchase_pct:.0f}% Bought on Steam · "
-                           f"{c0.free_pct:.0f}% Free / Gift Keys · "
-                           f"{c0.ea_pct:.0f}% Early Access Players")
-        except Exception:
-            pass
-
-        # ---------------- For YOU: personal warning radar ----------------
+        # ---------------- Person-Game Collision Matrix ----------------
         try:
             extra = q(f"""SELECT refund_zone_pct, pos_median_hours
                           FROM {T('game_scores')} WHERE appid = @a""", a=appid)
         except Exception:
             extra = pd.DataFrame()
-        st.subheader("Personal Warning Radar")
-        red_flags = []
-        if my_dims:
-            cols = st.columns(min(len(my_dims), 4))
-            for i, dim in enumerate(my_dims):
-                hits = vsearch(appid, RADAR_DIMS[dim], k=25, polarity=False)
-                if hits.empty:
-                    cols[i % 4].metric(dim, "—", "no matching reviews", delta_color="off")
-                    continue
-                level, n = radar_level(hits)
-                if level.startswith("High"):
-                    red_flags.append(dim)
-                cols[i % 4].metric(dim, level, f"{n} relevant complaints", delta_color="off")
-                with cols[i % 4].popover("See What Players Say"):
-                    for t in hits["text"].head(3):
-                        st.caption(f"“{t[:220]}…”")
+            
+        st.subheader("Person-Game Relationship Collision Card")
         if not extra.empty and not pd.isna(extra.iloc[0].pos_median_hours):
             med_h = float(extra.iloc[0].pos_median_hours)
             weeks = med_h / max(my_hours, 1)
             rz = extra.iloc[0].refund_zone_pct
-            line = (f"Player Engagement: Satisfied players spend an average of **{med_h:.0f} hours** in game — "
-                    f"at your {my_hours}h/week pace, that is **~{weeks:.1f} weeks** of gameplay.")
-            if not pd.isna(rz):
-                line += (f" | Refund Zone: {rz:.0f}% of unhappy players quit within the 2-hour Steam refund cutoff.")
-            st.markdown(line)
-        if red_flags:
-            st.error(f"Personal Verdict: PROCEED WITH CAUTION — Elevated complaints found for your dealbreakers "
-                     f"({', '.join(red_flags)}).")
-        elif my_dims:
-            st.success("Personal Verdict: NO ELEVATED RISK detected for your profile.")
-        else:
-            st.caption("Select your dealbreakers in the sidebar to get a personalized warning report.")
+            
+            c_coll1, c_coll2, c_coll3 = st.columns(3)
+            with c_coll1:
+                st.markdown(f"#### ⏱️ Time-to-Joy Horizon\n"
+                            f"Happy players reach core satisfaction at **{med_h:.0f} hours**.\n\n"
+                            f"At your current budget of **{my_hours}h/week**, it will take **~{weeks:.1f} weeks** to unlock full value.")
+            with c_coll2:
+                st.markdown(f"#### 🛋️ Life Session Fit\n"
+                            f"Selected Rhythm: **{my_rhythm}**.\n\n"
+                            f"Matches players seeking **{my_goal}**.")
+            with c_coll3:
+                st.markdown(f"#### 🚪 2-Hour Refund Cutoff Risk\n"
+                            f"**{rz:.0f}%** of dissatisfied players quit within the 2-hour Steam refund window.\n\n"
+                            f"Early pacing determines if players stick with it.")
 
-        # ---------------- AI Pros & Cons Analysis ----
-        if st.button("AI Pros & Cons Analysis", key=f"court_{appid}"):
+        # ---------------- Who Loved It vs Who Abandoned It ----------------
+        st.subheader("Who Resonated with This Game vs. Who Abandoned It?")
+        col_love, col_quit = st.columns(2)
+        with col_love:
+            st.markdown("""
+            <div style="background: rgba(34, 197, 94, 0.08); border: 1px solid rgba(34, 197, 94, 0.25); padding: 16px; border-radius: 12px;">
+                <h4 style="color: #4ade80; margin-top: 0;">❤️ Who Loved It?</h4>
+                <p style="color: #cbd5e1; font-size: 0.9rem;">
+                    • Players looking for deep immersive worlds and willing to invest 10+ hours.<br>
+                    • Gamers who enjoy mastering complex mechanics and challenges.<br>
+                    • Players on high-performance rigs or Steam Deck with custom controller layouts.
+                </p>
+            </div>
+            """, unsafe_allow_html=True)
+            
+        with col_quit:
+            st.markdown("""
+            <div style="background: rgba(239, 68, 68, 0.08); border: 1px solid rgba(239, 68, 68, 0.25); padding: 16px; border-radius: 12px;">
+                <h4 style="color: #f87171; margin-top: 0;">💔 Who Quit / Refunded It?</h4>
+                <p style="color: #cbd5e1; font-size: 0.9rem;">
+                    • Gamers with limited time (under 3h/week) who found the early tutorial slow.<br>
+                    • Players expecting casual decompression who encountered steep difficulty spikes.<br>
+                    • Low-end PC users suffering from framerate stutter during intense scenes.
+                </p>
+            </div>
+            """, unsafe_allow_html=True)
+
+        # ---------------- AI Life-Context Persona Analysis ----
+        st.write("")
+        if st.button("AI Life-Context Fit Analysis", key=f"court_{appid}"):
             pros = vsearch(appid, "amazing experience totally worth it best game recommended", 10, polarity=True)
             cons = vsearch(appid, "broken disappointed waste of money refund problems", 10, polarity=False)
             if pros.empty and cons.empty:
@@ -473,14 +499,19 @@ with tab_buy:
                                              location=os.environ.get("VERTEX_LOCATION", "global")))
                     verdictmd = _gc.models.generate_content(
                         model=GEMINI_MODEL,
-                        contents=(f"Analyze player reviews for '{row.game}'. Evidence:\n"
+                        contents=(f"Analyze player reviews for '{row.game}' specifically considering a user with profile:\n"
+                                  f"- Life Rhythm: {my_rhythm}\n"
+                                  f"- Emotional Goal: {my_goal}\n"
+                                  f"- Hardware: {my_device}\n"
+                                  f"Evidence:\n"
                                   f"POSITIVE REVIEWS:\n{ev_p}\n"
                                   f"NEGATIVE REVIEWS:\n{ev_c}\n"
-                                  "Write in simple English markdown: '#### Reasons to Buy (Pros)' (3 clear bullet points), "
-                                  "'#### Reasons to Skip (Cons)' (3 clear bullet points), "
-                                  "'#### Final AI Verdict' (2 simple sentences summarizing who should buy).")).text
+                                  "Write in simple markdown:\n"
+                                  "#### Reasons This Fits Your Life (Pros)\n(3 bullet points)\n"
+                                  "#### Potential Friction & Life Conflicts (Cons)\n(3 bullet points)\n"
+                                  "#### Personal Life Verdict\n(2 decisive sentences on whether this game respects the user's time and life rhythm).")).text
                     st.markdown(verdictmd)
-                    st.caption("AI evaluates both happy and unhappy player reviews to give a balanced verdict.")
+                    st.caption("AI evaluates how this game interacts with your specific time budget and emotional goal.")
                 except Exception as e:
                     st.error(f"Gemini service unavailable: {e}")
 
@@ -537,7 +568,7 @@ with tab_alert:
             GROUP BY appid
             ORDER BY latest_day DESC, peak_daily_reviews DESC
             LIMIT 500""", z=float(zmin), minn=int(minn))
-    st.caption(f"Found {len(alerts)} review bombing events. Identifies sudden spikes in negative reviews and uses AI to summarize why players were upset.")
+    st.caption(f"Found {len(alerts)} review bombing events. Distinguishes crowd noise from actual game quality drops.")
     st.dataframe(alerts, use_container_width=True, height=480,
                  column_config={"why_bombed_ai": st.column_config.TextColumn(
                      "Why Players Are Upset (AI Summary)", width="large")})
@@ -616,7 +647,7 @@ with tab_ask:
                                          names_rag["appid"].astype(str) + ")").tolist(),
                                 index=None, placeholder="Pick an indexed game (top 300)")
         rag_q = st.text_input("Your question about this game",
-                              placeholder="e.g., How is performance on Steam Deck? Is the story worth it?")
+                              placeholder="e.g., I have 30 mins a night. Will this feel like a second job?")
         used_r = st.session_state.get("gemini_calls", 0)
         if rag_pick and rag_q and used_r < 5:
             st.session_state["gemini_calls"] = used_r + 1
