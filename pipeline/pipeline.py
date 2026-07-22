@@ -145,21 +145,26 @@ def main():
             names = pd.read_parquet(names_f)
             scores = scores.merge(names, on="appid", how="left")
             alerts = alerts.merge(names, on="appid", how="left")
-        daily.to_parquet("out_game_daily.parquet", index=False)
-        scores.to_parquet("out_game_scores.parquet", index=False)
-        alerts.to_parquet("out_alerts.parquet", index=False)
+        
+        out_dir = os.environ.get("OUT_DIR", DATA_DIR)
+        os.makedirs(out_dir, exist_ok=True)
+        daily.to_parquet(os.path.join(out_dir, "out_game_daily.parquet"), index=False)
+        scores.to_parquet(os.path.join(out_dir, "out_game_scores.parquet"), index=False)
+        alerts.to_parquet(os.path.join(out_dir, "out_alerts.parquet"), index=False)
 
     total = sum(t for _, t in _timings)
     _timings.append(("end_to_end", total))
     print(f"\n[√] End-to-End: {total:.2f}s | Scores: {len(scores):,} games | Alerts: {len(alerts):,} logs")
 
+    out_dir = os.environ.get("OUT_DIR", DATA_DIR)
+    bench_csv = os.path.join(out_dir, BENCH_CSV)
     bench = pd.DataFrame(_timings, columns=["stage", "seconds"])
     bench.insert(0, "mode", MODE)
     bench.insert(0, "run_ts", datetime.now(timezone.utc).isoformat(timespec="seconds"))
     bench["rows"] = rows
-    bench.to_csv(BENCH_CSV, mode="a", index=False,
-                 header=not os.path.exists(BENCH_CSV))
-    print(f"[√] Timing appended to -> {BENCH_CSV}")
+    bench.to_csv(bench_csv, mode="a", index=False,
+                 header=not os.path.exists(bench_csv))
+    print(f"[√] Timing appended to -> {bench_csv}")
 
 
 
