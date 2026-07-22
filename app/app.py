@@ -207,6 +207,16 @@ div[role="option"] {
 [data-testid="stElementContainer"]:has(.panel-mark),
 [data-testid="stMarkdown"]:has(.panel-mark) { display: none !important; }
 
+/* ---- Personal-fit adjustment chips -------------------------------------- */
+.fit-factors { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 12px; }
+.fit-factor {
+    font-size: 0.75rem; padding: 4px 10px; border-radius: 7px;
+    background: rgba(255, 255, 255, 0.035);
+    border: 1px solid rgba(255, 255, 255, 0.07);
+    color: #94a3b8; line-height: 1.35;
+}
+.fit-factor b { font-weight: 700; }
+
 /* ---- Section headers ---------------------------------------------------- */
 .sec { margin: 6px 0 14px; }
 .sec-eyebrow {
@@ -331,16 +341,101 @@ def section(title: str, eyebrow: str | None = None, sub: str | None = None):
     st.markdown(html + "</div>", unsafe_allow_html=True)
 
 
-def fit_verdict(score: float, red_flags: list) -> tuple[str, str, str]:
-    """Personal-fit badge as (title, description, accent_color).
-    Thresholds mirror the documented purchase spec: >=70 strong, >=40 moderate."""
-    if red_flags:
-        return ("POOR MATCH", f"Collides with your dealbreakers: {', '.join(red_flags)}", "#f87171")
-    if score >= 70:
-        return ("EXCELLENT MATCH", "High alignment between your life rhythm and this game.", "#4ade80")
-    if score >= 40:
-        return ("MODERATE MATCH", "Playable, but may require adjusting your time expectations.", "#facc15")
-    return ("LOW MATCH", "May not fit your current gaming routine or time budget.", "#f87171")
+FIT_DEALBREAKER_CAP = 35
+
+
+def personal_fit(score, radar, med_hours, refund_pct, rhythm, goal, device, hours, dims):
+    """Score how well a game fits THIS player, not how good the game is.
+
+    The old fit_verdict() just thresholded score_live — a general purchase-confidence
+    number — while the badge claimed "high alignment between your life rhythm and this
+    game". It could call a game an EXCELLENT MATCH for a 30-minute-session player while
+    the AI analysis of the same reviews concluded the opposite.
+
+    Here the game's own score is the starting point and the profile applies adjustments,
+    each computed from real data. The weights are transparent judgement calls rather than
+    fitted parameters, which is exactly why every one is returned and shown to the user.
+    Returns (fit, title, description, colour, factors).
+    """
+    factors = []
+    fit = float(score)
+
+    # How long before the game pays off, against the weekly budget the user set.
+    if med_hours is not None and not pd.isna(med_hours) and hours > 0:
+        weeks = float(med_hours) / hours
+        if weeks > 20:
+            d = -25
+        elif weeks > 10:
+            d = -14
+        elif weeks > 4:
+            d = -5
+        else:
+            d = 4
+        factors.append(("Time to value", d,
+                        f"~{weeks:.0f} weeks at {hours}h/week"))
+
+    # Bailing early hurts short-session players most.
+    if refund_pct is not None and not pd.isna(refund_pct):
+        short = rhythm.startswith("Busy")
+        d = (-12 if short else -6) if refund_pct >= 25 else \
+            (-6 if short else -3) if refund_pct >= 15 else 0
+        if d:
+            factors.append(("Early drop-off", d,
+                            f"{refund_pct:.0f}% quit inside the refund window"))
+
+    # Hardware: use measured complaint prevalence on the matching dimension.
+    hw_dim = {"Low-end PC": "Low-End PC Performance",
+              "Steam Deck": "Steam Deck & Controller"}.get(device)
+    if hw_dim and hw_dim in radar:
+        lvl = radar[hw_dim]["level"]
+        d = {"High Risk": -22, "Moderate Risk": -9}.get(lvl, 3)
+        factors.append((device, d, f"{lvl.replace(' Risk', '').lower()} complaints on this hardware"))
+
+    # Goal — only mapped where the review data actually supports it.
+    if goal.startswith("Decompress") and "Repetitive Grind" in radar:
+        lvl = radar["Repetitive Grind"]["level"]
+        d = {"High Risk": -14, "Moderate Risk": -6}.get(lvl, 0)
+        if d:
+            factors.append(("Low-stress goal", d, "players call it grindy"))
+
+    fit = max(0.0, min(100.0, fit + sum(d for _, d, _ in factors)))
+
+    hard = [d for d in dims if radar.get(d) and radar[d]["level"].startswith("High")]
+    if hard:
+        fit = min(fit, FIT_DEALBREAKER_CAP)
+        factors.append(("Dealbreaker", None, "capped by " + ", ".join(hard)))
+        return (fit, "POOR MATCH",
+                f"Collides with your dealbreakers: {', '.join(hard)}", "#f87171", factors)
+
+    if fit >= 70:
+        return (fit, "EXCELLENT MATCH",
+                "Suits your time budget, hardware and what you want out of it.",
+                "#4ade80", factors)
+    if fit >= 40:
+        return (fit, "MODERATE MATCH",
+                "Workable, but expect friction against your profile.", "#facc15", factors)
+    return (fit, "LOW MATCH",
+            "Poorly aligned with how much you play and what you want from it.",
+            "#f87171", factors)
+
+
+def fit_factors_html(factors: list) -> str:
+    """Show the adjustments behind the fit number so it can be audited, not just trusted."""
+    if not factors:
+        return ""
+    out = []
+    for label, d, why in factors:
+        if d is None:
+            col, val = "#f87171", "cap"
+        elif d > 0:
+            col, val = "#4ade80", f"+{d}"
+        elif d <= -10:
+            col, val = "#f87171", str(d)
+        else:
+            col, val = "#facc15", str(d)
+        out.append(f'<span class="fit-factor">{label} '
+                   f'<b style="color:{col}">{val}</b> · {why}</span>')
+    return f'<div class="fit-factors">{"".join(out)}</div>'
 
 
 def verdict_badge(title: str, desc: str, color: str) -> str:
@@ -514,6 +609,67 @@ def chart_theme(chart):
                             tickColor="rgba(255,255,255,0.15)"))
 
 
+_DIM_SHORT = {
+    "Monetization & MTX": "Monetisation", "Low-End PC Performance": "Low-end PC",
+    "Bugs & Stability": "Bugs", "Server & Disconnects": "Servers",
+    "Short Content": "Short content", "Repetitive Grind": "Grind",
+    "Steam Deck & Controller": "Steam Deck",
+}
+
+
+def radar_figure(radar: dict, my_dims: list):
+    """Polar view of complaint prevalence. Dotted rings mark the Moderate/High thresholds,
+    so the shape is read against a scale instead of by area alone."""
+    dims = [d for d in RADAR_DIMS if d in radar]
+    if not dims:
+        return None
+    vals = [radar[d]["share"] for d in dims]
+    theta = [_DIM_SHORT.get(d, d) + (" ★" if d in my_dims else "") for d in dims]
+    top = max(max(vals) * 1.3, HIGH_SHARE * 100 * 1.6)
+
+    fig = go.Figure()
+    for lvl, col in ((MODERATE_SHARE * 100, "#facc15"), (HIGH_SHARE * 100, "#f87171")):
+        fig.add_trace(go.Scatterpolar(
+            r=[lvl] * (len(dims) + 1), theta=theta + theta[:1], mode="lines",
+            line=dict(color=col, width=1, dash="dot"), hoverinfo="skip"))
+    ring_colors = [_RISK_COLOR[radar[d]["level"]] for d in dims]
+    fig.add_trace(go.Scatterpolar(
+        r=vals + vals[:1], theta=theta + theta[:1], mode="lines+markers", fill="toself",
+        fillcolor="rgba(56,189,248,0.16)", line=dict(color=CHART_ACCENT, width=2),
+        marker=dict(size=9, color=ring_colors + ring_colors[:1]),
+        hovertemplate="%{theta}<br>%{r:.1f}% of reviews<extra></extra>"))
+    fig.update_layout(
+        polar=dict(
+            bgcolor="rgba(0,0,0,0)",
+            # nticks keeps the radial labels sparse; the default ladder of ~9 values
+            # stacks diagonally across the middle and collides with the polygon.
+            radialaxis=dict(range=[0, top], ticksuffix="%", showline=False, nticks=4,
+                            angle=90, tickangle=0,
+                            gridcolor="rgba(255,255,255,0.09)",
+                            tickfont=dict(size=9, color="#64748b")),
+            angularaxis=dict(gridcolor="rgba(255,255,255,0.09)",
+                             tickfont=dict(size=11, color="#cbd5e1"))),
+        showlegend=False, height=340, margin=dict(l=70, r=70, t=26, b=26),
+        paper_bgcolor="rgba(0,0,0,0)", font=dict(family="Plus Jakarta Sans"))
+    return fig
+
+
+def score_gauge(score: float, color: str):
+    """Bands mirror the documented verdict thresholds (>=70 strong, >=40 moderate)."""
+    fig = go.Figure(go.Indicator(
+        mode="gauge+number", value=float(score),
+        number=dict(valueformat=".0f", font=dict(size=34, color="#f8fafc")),
+        gauge=dict(
+            # Tick labels clip against the arc ends; the bands plus the number carry it.
+            axis=dict(range=[0, 100], tickwidth=0, showticklabels=False),
+            bar=dict(color=color, thickness=0.3), bgcolor="rgba(255,255,255,0.04)",
+            borderwidth=0,
+            steps=[dict(range=[0, 40], color="rgba(248,113,113,0.10)"),
+                   dict(range=[40, 70], color="rgba(250,204,21,0.10)"),
+                   dict(range=[70, 100], color="rgba(74,222,128,0.10)")])))
+    fig.update_layout(height=165, margin=dict(l=12, r=12, t=8, b=0),
+                      paper_bgcolor="rgba(0,0,0,0)", font=dict(family="Plus Jakarta Sans"))
+    return fig
 # Prevalence thresholds — calibrated against high- vs low-friction reference games.
 STRONG_DIST = 0.30      # cosine distance below which a review is genuinely on-topic
 HIGH_SHARE = 0.03       # >=3% of a game's reviews on-topic-negative -> High Risk
@@ -842,10 +998,18 @@ def person_game_fit(my_rhythm, my_goal, my_device, my_hours, my_dims):
         #      Red flags are derived from the same pass (no duplicate searches). ----
         with st.spinner("Profiling player sentiment across friction dimensions..."):
             radar, praise_texts = friction_radar(appid)
-        red_flags = [d for d in my_dims
-                     if radar.get(d) and radar[d]["level"].startswith("High")]
+        # Needed before the card now: the fit score is derived from these.
+        try:
+            extra = q(f"""SELECT refund_zone_pct, pos_median_hours
+                          FROM {T('game_scores')} WHERE appid = @a""", a=appid)
+        except Exception:
+            extra = pd.DataFrame()
+        _med = extra.iloc[0].pos_median_hours if not extra.empty else None
+        _rz = extra.iloc[0].refund_zone_pct if not extra.empty else None
 
-        fit_title, fit_desc, fit_color = fit_verdict(row.score_live, red_flags)
+        fit_score, fit_title, fit_desc, fit_color, fit_factors = personal_fit(
+            row.score_live, radar, _med, _rz,
+            my_rhythm, my_goal, my_device, my_hours, my_dims)
 
         with panel():
             c_img, c_m, c_g = st.columns([1.1, 2.2, 1.1])
@@ -853,19 +1017,23 @@ def person_game_fit(my_rhythm, my_goal, my_device, my_hours, my_dims):
                         use_container_width=True)
             with c_m:
                 st.markdown(verdict_badge(fit_title, fit_desc, fit_color), unsafe_allow_html=True)
-                m2, m3 = st.columns(2)
-                m2.metric("Recent 90-Day Rating",
+                st.markdown(fit_factors_html(fit_factors), unsafe_allow_html=True)
+                m1, m2, m3 = st.columns(3)
+                # Game quality and personal fit are separate answers — showing both is
+                # what lets "great game, wrong game for you" actually be visible.
+                m1.metric("Game Rating", f"{row.score_live:.0f}/100")
+                m2.metric("Recent 90-Day",
                           "—" if pd.isna(row.recent_pos_rate_live) else f"{row.recent_pos_rate_live:.0f}%",
                           delta=None if (pd.isna(row.recent_pos_rate_live) or pd.isna(row.raw_pos_rate))
                           else f"{row.recent_pos_rate_live - row.raw_pos_rate:+.0f}% vs overall")
-                m3.metric("Reviews Analyzed", f"{int(row.n_reviews_total):,}")
+                m3.metric("Reviews", f"{int(row.n_reviews_total):,}")
             with c_g:
-                st.plotly_chart(score_gauge(row.score_live, fit_color),
+                st.plotly_chart(score_gauge(fit_score, fit_color),
                                 use_container_width=True,
                                 config={"displayModeBar": False})
                 st.markdown('<div style="text-align:center;margin-top:-14px;color:#7c8ba1;'
                             'font-size:0.7rem;letter-spacing:0.09em;text-transform:uppercase;'
-                            'font-weight:600;">Purchase confidence</div>',
+                            'font-weight:600;">Your personal fit</div>',
                             unsafe_allow_html=True)
             if (not pd.isna(row.recent_pos_rate_live)
                     and row.score_live - row.recent_pos_rate_live > 15):
@@ -883,13 +1051,7 @@ def person_game_fit(my_rhythm, my_goal, my_device, my_hours, my_dims):
         with t_ai, panel():
             render_ai_analysis(appid, str(row.game), my_rhythm, my_goal, my_device)
 
-        # ---- How this game fits your time (real data: median hours + refund risk) ----
-        try:
-            extra = q(f"""SELECT refund_zone_pct, pos_median_hours
-                          FROM {T('game_scores')} WHERE appid = @a""", a=appid)
-        except Exception:
-            extra = pd.DataFrame()
-
+        # ---- How this game fits your time (extra was fetched above for the fit score) ----
         if not extra.empty and not pd.isna(extra.iloc[0].pos_median_hours):
             med_h = float(extra.iloc[0].pos_median_hours)
             weeks = med_h / max(my_hours, 1)
@@ -1258,69 +1420,6 @@ def auto_chart(df: pd.DataFrame):
 def _use_example(ex: str):
     st.session_state["nl_q_input"] = ex
     st.session_state["nl_pending"] = ex
-
-
-_DIM_SHORT = {
-    "Monetization & MTX": "Monetisation", "Low-End PC Performance": "Low-end PC",
-    "Bugs & Stability": "Bugs", "Server & Disconnects": "Servers",
-    "Short Content": "Short content", "Repetitive Grind": "Grind",
-    "Steam Deck & Controller": "Steam Deck",
-}
-
-
-def radar_figure(radar: dict, my_dims: list):
-    """Polar view of complaint prevalence. Dotted rings mark the Moderate/High thresholds,
-    so the shape is read against a scale instead of by area alone."""
-    dims = [d for d in RADAR_DIMS if d in radar]
-    if not dims:
-        return None
-    vals = [radar[d]["share"] for d in dims]
-    theta = [_DIM_SHORT.get(d, d) + (" ★" if d in my_dims else "") for d in dims]
-    top = max(max(vals) * 1.3, HIGH_SHARE * 100 * 1.6)
-
-    fig = go.Figure()
-    for lvl, col in ((MODERATE_SHARE * 100, "#facc15"), (HIGH_SHARE * 100, "#f87171")):
-        fig.add_trace(go.Scatterpolar(
-            r=[lvl] * (len(dims) + 1), theta=theta + theta[:1], mode="lines",
-            line=dict(color=col, width=1, dash="dot"), hoverinfo="skip"))
-    ring_colors = [_RISK_COLOR[radar[d]["level"]] for d in dims]
-    fig.add_trace(go.Scatterpolar(
-        r=vals + vals[:1], theta=theta + theta[:1], mode="lines+markers", fill="toself",
-        fillcolor="rgba(56,189,248,0.16)", line=dict(color=CHART_ACCENT, width=2),
-        marker=dict(size=9, color=ring_colors + ring_colors[:1]),
-        hovertemplate="%{theta}<br>%{r:.1f}% of reviews<extra></extra>"))
-    fig.update_layout(
-        polar=dict(
-            bgcolor="rgba(0,0,0,0)",
-            # nticks keeps the radial labels sparse; the default ladder of ~9 values
-            # stacks diagonally across the middle and collides with the polygon.
-            radialaxis=dict(range=[0, top], ticksuffix="%", showline=False, nticks=4,
-                            angle=90, tickangle=0,
-                            gridcolor="rgba(255,255,255,0.09)",
-                            tickfont=dict(size=9, color="#64748b")),
-            angularaxis=dict(gridcolor="rgba(255,255,255,0.09)",
-                             tickfont=dict(size=11, color="#cbd5e1"))),
-        showlegend=False, height=340, margin=dict(l=70, r=70, t=26, b=26),
-        paper_bgcolor="rgba(0,0,0,0)", font=dict(family="Plus Jakarta Sans"))
-    return fig
-
-
-def score_gauge(score: float, color: str):
-    """Bands mirror the documented verdict thresholds (>=70 strong, >=40 moderate)."""
-    fig = go.Figure(go.Indicator(
-        mode="gauge+number", value=float(score),
-        number=dict(valueformat=".0f", font=dict(size=34, color="#f8fafc")),
-        gauge=dict(
-            # Tick labels clip against the arc ends; the bands plus the number carry it.
-            axis=dict(range=[0, 100], tickwidth=0, showticklabels=False),
-            bar=dict(color=color, thickness=0.3), bgcolor="rgba(255,255,255,0.04)",
-            borderwidth=0,
-            steps=[dict(range=[0, 40], color="rgba(248,113,113,0.10)"),
-                   dict(range=[40, 70], color="rgba(250,204,21,0.10)"),
-                   dict(range=[70, 100], color="rgba(74,222,128,0.10)")])))
-    fig.update_layout(height=165, margin=dict(l=12, r=12, t=8, b=0),
-                      paper_bgcolor="rgba(0,0,0,0)", font=dict(family="Plus Jakarta Sans"))
-    return fig
 
 
 with tab_ask:
