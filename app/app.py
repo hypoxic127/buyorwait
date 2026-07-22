@@ -86,8 +86,8 @@ header[data-testid="stHeader"] {
     font-size: 0.85rem;
 }
 
-/* Styled Tabs */
-[data-testid="stTab"] {
+/* Styled Tabs — target the stable BaseWeb tab hooks (data-testid="stTab" is not reliable) */
+[data-testid="stTabs"] button[data-baseweb="tab"] {
     font-weight: 600;
     font-size: 15px;
     padding: 10px 22px;
@@ -98,15 +98,20 @@ header[data-testid="stHeader"] {
     transition: all 0.2s ease;
     margin-right: 6px;
 }
-[data-testid="stTab"]:hover {
+[data-testid="stTabs"] button[data-baseweb="tab"]:hover {
     color: #e2e8f0;
     border-color: rgba(102, 192, 244, 0.3);
 }
-[data-testid="stTab"][aria-selected="true"] {
+[data-testid="stTabs"] button[data-baseweb="tab"][aria-selected="true"] {
     background: linear-gradient(135deg, rgba(102, 192, 244, 0.22) 0%, rgba(56, 189, 248, 0.12) 100%);
     color: #38bdf8;
     border: 1px solid rgba(56, 189, 248, 0.4);
     box-shadow: 0 4px 12px rgba(56, 189, 248, 0.15);
+}
+/* Hide the default red BaseWeb tab underline highlight so our pill styling reads cleanly */
+[data-testid="stTabs"] [data-baseweb="tab-highlight"],
+[data-testid="stTabs"] [data-baseweb="tab-border"] {
+    background-color: transparent !important;
 }
 
 /* Sidebar Glassmorphism */
@@ -188,15 +193,37 @@ def T(name: str) -> str:
     return f"`{PROJECT}.{DATASET}.{name}`"
 
 
-def fit_verdict(score: float, red_flags: list, life_rhythm: str) -> tuple[str, str]:
+def fit_verdict(score: float, red_flags: list) -> tuple[str, str, str]:
+    """Personal-fit badge as (title, description, accent_color).
+    Thresholds mirror the documented purchase spec: >=70 strong, >=40 moderate."""
     if red_flags:
-        return "POOR MATCH (Risk Detected)", f"Collides with your personal dealbreakers ({', '.join(red_flags)})"
-    if score >= 75:
-        return "EXCELLENT MATCH", "High alignment between your life rhythm and game experience"
-    elif score >= 50:
-        return "MODERATE MATCH", "Playable, but may require adjusting your time expectations"
-    else:
-        return "LOW MATCH", "May not fit your current gaming routine or time budget"
+        return ("POOR MATCH", f"Collides with your dealbreakers: {', '.join(red_flags)}", "#f87171")
+    if score >= 70:
+        return ("EXCELLENT MATCH", "High alignment between your life rhythm and this game.", "#4ade80")
+    if score >= 40:
+        return ("MODERATE MATCH", "Playable, but may require adjusting your time expectations.", "#facc15")
+    return ("LOW MATCH", "May not fit your current gaming routine or time budget.", "#f87171")
+
+
+def verdict_badge(title: str, desc: str, color: str) -> str:
+    """A color-coded verdict banner (used instead of st.metric, which truncates long text)."""
+    return (f'<div style="background:{color}1a;border:1px solid {color}55;border-radius:12px;'
+            f'padding:12px 18px;margin-bottom:12px;">'
+            f'<span style="color:{color};font-weight:800;font-size:1.05rem;letter-spacing:0.3px;">{title}</span>'
+            f'<div style="color:#cbd5e1;font-size:0.9rem;margin-top:3px;">{desc}</div></div>')
+
+
+_RISK_COLOR = {"High Risk": "#f87171", "Moderate Risk": "#facc15", "Low Risk": "#4ade80"}
+
+
+def risk_chip(dim: str, level: str, highlighted: bool) -> str:
+    """A compact risk pill; highlighted dims (the user's dealbreakers) get a ring and star."""
+    c = _RISK_COLOR.get(level, "#94a3b8")
+    ring = f"box-shadow:0 0 0 1px {c};" if highlighted else ""
+    star = " ★" if highlighted else ""
+    return (f'<span style="display:inline-block;background:{c}1a;border:1px solid {c}55;{ring}'
+            f'color:{c};border-radius:20px;padding:5px 12px;margin:3px;font-size:0.82rem;'
+            f'font-weight:600;">{dim}: {level}{star}</span>')
 
 
 # ---- Live check: today's sentiment straight from the public Steam Web API ----
@@ -258,15 +285,14 @@ def live_panel(appid: int, snap_recent: float | None):
         st.info("Steam reports no reviews for this app.")
         return
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Overall Rating (Steam Live)", live["desc"],
-              f"{live['total_pos']:.0f}% positive", delta_color="off")
+    c1.metric("Overall Positive (Live)", f"{live['total_pos']:.0f}%")
     c2.metric("Total Reviews (Live)", f"{live['total']:,}")
     c3.metric(f"Newest {live['sample_n']} Reviews",
-              "—" if live["sample_pos"] is None else f"{live['sample_pos']:.0f}% Positive",
+              "—" if live["sample_pos"] is None else f"{live['sample_pos']:.0f}%",
               None if (live["sample_pos"] is None or snap_recent is None)
               else f"{live['sample_pos'] - snap_recent:+.0f}% vs recent snapshot")
     c4.metric("Newest Review Date", live["newest"] or "—")
-    st.caption("Live data fetched directly from Steam API to keep scores up to date.")
+    st.caption(f"Steam summary: **{live['desc']}** — live data fetched directly from the Steam API.")
 
 
 # ---- Semantic layer: query embedding + BigQuery VECTOR_SEARCH ----------------
@@ -291,18 +317,32 @@ def vsearch(appid: int, query: str, k: int = 20, polarity: bool | None = None) -
         params.append(bigquery.ScalarQueryParameter("p", "BOOL", bool(polarity)))
     cfg = bigquery.QueryJobConfig(query_parameters=params,
                                   maximum_bytes_billed=2 * 1024 ** 3)
+    # use_brute_force is required: the table has an ANN vector index, but we pre-filter
+    # to one appid inside the base subquery. ANN probing would miss that game's rows and
+    # return nothing — a full scan of one game's ~hundreds of vectors is cheap and exact.
     sql = f"""
         SELECT base.text, base.voted_up, base.votes_up,
                base.playtime_h, base.day, distance
         FROM VECTOR_SEARCH(
           (SELECT * FROM {T('review_vectors')} WHERE {where}),
           'embedding', (SELECT @qv AS embedding),
-          top_k => {int(k)}, distance_type => 'COSINE')
+          top_k => {int(k)}, distance_type => 'COSINE',
+          options => '{{"use_brute_force": true}}')
         ORDER BY distance"""
     try:
         return _client().query(sql, job_config=cfg).to_dataframe()
     except Exception:
         return pd.DataFrame()
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def game_vec_total(appid: int) -> int:
+    """Total indexed review vectors for a game — the denominator for friction prevalence."""
+    try:
+        return int(q(f"SELECT COUNT(*) AS c FROM {T('review_vectors')} WHERE appid = @a",
+                     a=int(appid)).iloc[0].c)
+    except Exception:
+        return 0
 
 
 RADAR_DIMS = {
@@ -316,10 +356,24 @@ RADAR_DIMS = {
 }
 
 
-def radar_level(hits: pd.DataFrame) -> tuple[str, int]:
-    close = hits[hits["distance"] < 0.45] if len(hits) else hits
-    n = len(close)
-    return ("High Risk", n) if n >= 12 else ("Moderate Risk", n) if n >= 5 else ("Low Risk", n)
+def radar_level(hits: pd.DataFrame, total_reviews: int) -> tuple[str, int]:
+    """Grade a friction dimension by PREVALENCE rather than a raw match count.
+
+    We take the share of the game's sampled reviews that are *strongly* on-topic
+    negatives (cosine distance < 0.30 — a genuine match, not a loose one), normalized
+    by the game's total review sample. A loose <0.45 count saturates (almost every game
+    hits it for every topic); prevalence-at-0.30 separates a game's real problems from
+    generic noise. Thresholds calibrated against high- vs low-friction reference games.
+    """
+    if not len(hits) or total_reviews <= 0:
+        return ("Low Risk", 0)
+    strong = int((hits["distance"] < 0.30).sum())
+    share = strong / total_reviews
+    if share >= 0.03:
+        return ("High Risk", strong)
+    if share >= 0.01:
+        return ("Moderate Risk", strong)
+    return ("Low Risk", strong)
 
 
 def _log_usage(event: str, game: str, appid: int):
@@ -401,8 +455,11 @@ with tab_buy:
                         labels, index=None,
                         placeholder="e.g., Cyberpunk 2077 / Overwatch 2 / ELDEN RING")
 
-    with st.expander("Game not listed? Search Steam live"):
-        kw_live = st.text_input("Steam live search", placeholder="e.g., Black Myth: Wukong")
+    # Inline live-search fallback — visible immediately (no accordion), hidden once a game is picked.
+    if not pick:
+        st.caption("Not in the list, or released after our 2023 snapshot? Search Steam directly:")
+        kw_live = st.text_input("Steam live search", placeholder="e.g., Black Myth: Wukong",
+                                label_visibility="collapsed")
         if kw_live:
             try:
                 live_hits = steam_search(kw_live)
@@ -426,90 +483,102 @@ with tab_buy:
         row = hit.iloc[0]
         _log_usage("search", str(row.game), appid)
 
-        # Calculate personal red flags
-        red_flags = []
-        if my_dims:
-            for dim in my_dims:
-                hits = vsearch(appid, RADAR_DIMS[dim], k=25, polarity=False)
-                if not hits.empty:
-                    level, n = radar_level(hits)
-                    if level.startswith("High"):
-                        red_flags.append(dim)
+        # ---- Friction Radar: one vector search per dimension, computed ONCE.
+        #      Red flags are derived from this same pass (no duplicate searches). ----
+        with st.spinner("Profiling player sentiment across friction dimensions..."):
+            total_vec = game_vec_total(appid)
+            radar = {}  # dim -> {"level", "n", "hits"} or None when no indexed reviews
+            for dim, query in RADAR_DIMS.items():
+                # k wide enough that the strong-match (<0.30) count isn't truncated
+                hits = vsearch(appid, query, k=80, polarity=False)
+                if hits.empty:
+                    radar[dim] = None
+                else:
+                    level, strong = radar_level(hits, total_vec)
+                    radar[dim] = {"level": level, "n": strong, "hits": hits}
+        red_flags = [d for d in my_dims
+                     if radar.get(d) and radar[d]["level"].startswith("High")]
 
-        fit_title, fit_desc = fit_verdict(row.score_live, red_flags, my_rhythm)
+        fit_title, fit_desc, fit_color = fit_verdict(row.score_live, red_flags)
 
         c_img, c_m = st.columns([1, 3])
         c_img.image(f"https://cdn.cloudflare.steamstatic.com/steam/apps/{appid}/header.jpg",
                     use_container_width=True)
         with c_m:
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Personal Fit Match", fit_title)
-            c2.metric("Game Rating Score", f"{row.score_live:.0f}/100")
-            c3.metric("Recent 90-Day Rating",
+            st.markdown(verdict_badge(fit_title, fit_desc, fit_color), unsafe_allow_html=True)
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Rating Score", f"{row.score_live:.0f}/100")
+            m2.metric("Recent 90-Day Rating",
                       "—" if pd.isna(row.recent_pos_rate_live) else f"{row.recent_pos_rate_live:.0f}%",
                       delta=None if (pd.isna(row.recent_pos_rate_live) or pd.isna(row.raw_pos_rate))
                       else f"{row.recent_pos_rate_live - row.raw_pos_rate:+.0f}% vs overall")
-            c4.metric("Reviews Analyzed", f"{int(row.n_reviews_total):,}")
-        
-        st.info(f"**Personal Fit Summary:** {fit_desc}")
+            m3.metric("Reviews Analyzed", f"{int(row.n_reviews_total):,}")
+            if (not pd.isna(row.recent_pos_rate_live)
+                    and row.score_live - row.recent_pos_rate_live > 15):
+                st.warning("Recent 90-day sentiment is running more than 15 points below the "
+                           "overall score — momentum may be cooling.")
 
-        # ---------------- Person-Game Collision Matrix ----------------
+        # ---- How this game fits your time (real data: median hours + refund risk) ----
         try:
             extra = q(f"""SELECT refund_zone_pct, pos_median_hours
                           FROM {T('game_scores')} WHERE appid = @a""", a=appid)
         except Exception:
             extra = pd.DataFrame()
-            
-        st.subheader("Person-Game Relationship Collision Card")
+
         if not extra.empty and not pd.isna(extra.iloc[0].pos_median_hours):
             med_h = float(extra.iloc[0].pos_median_hours)
             weeks = med_h / max(my_hours, 1)
             rz = extra.iloc[0].refund_zone_pct
-            
-            c_coll1, c_coll2, c_coll3 = st.columns(3)
-            with c_coll1:
-                st.markdown(f"#### ⏱️ Time-to-Joy Horizon\n"
-                            f"Happy players reach core satisfaction at **{med_h:.0f} hours**.\n\n"
-                            f"At your current budget of **{my_hours}h/week**, it will take **~{weeks:.1f} weeks** to unlock full value.")
-            with c_coll2:
-                st.markdown(f"#### 🛋️ Life Session Fit\n"
-                            f"Selected Rhythm: **{my_rhythm}**.\n\n"
-                            f"Matches players seeking **{my_goal}**.")
-            with c_coll3:
-                st.markdown(f"#### 🚪 2-Hour Refund Cutoff Risk\n"
-                            f"**{rz:.0f}%** of dissatisfied players quit within the 2-hour Steam refund window.\n\n"
-                            f"Early pacing determines if players stick with it.")
+            st.subheader("How This Game Fits Your Time")
+            k1, k2, k3 = st.columns(3)
+            k1.markdown(f"**Time-to-Joy Horizon**\n\n"
+                        f"Happy players hit their stride around **{med_h:.0f} hours** — "
+                        f"about **{weeks:.1f} weeks** at your **{my_hours}h/week** budget.")
+            k2.markdown(f"**Your Session Rhythm**\n\n"
+                        f"Profile: **{my_rhythm}**, seeking **{my_goal}**. "
+                        f"Weigh the pacing on the left against this.")
+            k3.markdown("**2-Hour Refund Window**\n\n"
+                        + (f"**{rz:.0f}%** of dissatisfied players bail inside Steam's refund "
+                           f"window — early pacing decides whether it sticks."
+                           if not pd.isna(rz) else "Refund-window data unavailable for this game."))
 
-        # ---------------- Who Loved It vs Who Abandoned It ----------------
-        st.subheader("Who Resonated with This Game vs. Who Abandoned It?")
-        col_love, col_quit = st.columns(2)
-        with col_love:
-            st.markdown("""
-            <div style="background: rgba(34, 197, 94, 0.08); border: 1px solid rgba(34, 197, 94, 0.25); padding: 16px; border-radius: 12px;">
-                <h4 style="color: #4ade80; margin-top: 0;">❤️ Who Loved It?</h4>
-                <p style="color: #cbd5e1; font-size: 0.9rem;">
-                    • Players looking for deep immersive worlds and willing to invest 10+ hours.<br>
-                    • Gamers who enjoy mastering complex mechanics and challenges.<br>
-                    • Players on high-performance rigs or Steam Deck with custom controller layouts.
-                </p>
-            </div>
-            """, unsafe_allow_html=True)
-            
-        with col_quit:
-            st.markdown("""
-            <div style="background: rgba(239, 68, 68, 0.08); border: 1px solid rgba(239, 68, 68, 0.25); padding: 16px; border-radius: 12px;">
-                <h4 style="color: #f87171; margin-top: 0;">💔 Who Quit / Refunded It?</h4>
-                <p style="color: #cbd5e1; font-size: 0.9rem;">
-                    • Gamers with limited time (under 3h/week) who found the early tutorial slow.<br>
-                    • Players expecting casual decompression who encountered steep difficulty spikes.<br>
-                    • Low-end PC users suffering from framerate stutter during intense scenes.
-                </p>
-            </div>
-            """, unsafe_allow_html=True)
+        # ---- Player Friction Radar: real per-game signal (replaces static filler) ----
+        st.subheader("Player Friction Radar")
+        if all(v is None for v in radar.values()):
+            st.caption("Not enough indexed reviews to profile player friction for this game.")
+        else:
+            ranked = sorted(
+                [(d, v) for d, v in radar.items() if v is not None],
+                key=lambda kv: {"High Risk": 0, "Moderate Risk": 1, "Low Risk": 2}[kv[1]["level"]])
+            chips = "".join(risk_chip(d, v["level"], d in my_dims) for d, v in ranked)
+            st.markdown(f'<div style="margin-bottom:8px;">{chips}</div>', unsafe_allow_html=True)
+            if my_dims:
+                st.caption("★ marks the dealbreakers from your profile.")
+
+            col_love, col_quit = st.columns(2)
+            praise = vsearch(appid, "amazing experience worth it best game highly recommend",
+                             k=6, polarity=True)
+            with col_love:
+                st.markdown("**What fans praise**")
+                if praise.empty:
+                    st.caption("No positive review evidence indexed.")
+                else:
+                    for t in praise["text"].head(3):
+                        st.markdown(f"> {' '.join(str(t).split())[:180]}")
+            with col_quit:
+                st.markdown("**What critics hit hardest**")
+                top_neg = [v for _, v in ranked if v["level"] != "Low Risk"][:1]
+                neg_texts = top_neg[0]["hits"]["text"].head(3).tolist() if top_neg else []
+                if not neg_texts:
+                    st.caption("No significant friction found in indexed reviews.")
+                else:
+                    for t in neg_texts:
+                        st.markdown(f"> {' '.join(str(t).split())[:180]}")
 
         # ---------------- AI Life-Context Persona Analysis ----
         st.write("")
-        if st.button("AI Life-Context Fit Analysis", key=f"court_{appid}"):
+        if st.button("Generate AI Life-Context Fit Analysis", key=f"court_{appid}",
+                     type="primary", use_container_width=True):
             pros = vsearch(appid, "amazing experience totally worth it best game recommended", 10, polarity=True)
             cons = vsearch(appid, "broken disappointed waste of money refund problems", 10, polarity=False)
             if pros.empty and cons.empty:
