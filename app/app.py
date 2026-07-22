@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 
 import altair as alt          # bundled with Streamlit — no extra dependency
 import pandas as pd
+import plotly.graph_objects as go
 import requests
 import streamlit as st
 from google.cloud import bigquery
@@ -525,36 +526,43 @@ def radar_level(strong: int, total_reviews: int) -> str:
     return "Low Risk"
 
 
-@st.cache_data(ttl=600, show_spinner=False)
-def friction_radar(appid: int) -> dict:
-    """Score every friction dimension for one game in a SINGLE BigQuery round trip.
+_PRAISE_KEY = "__praise__"
 
-    Cross-joins the game's negative reviews against all dimension query vectors at once,
-    giving an exact COUNTIF over the *full* negative set (no top-k truncation) plus the
-    three closest snippets per dimension. Replaces 7 separate VECTOR_SEARCH calls.
-    Returns {dim: {"level", "n", "texts"}}; empty dict when nothing is indexed.
+
+@st.cache_data(ttl=600, show_spinner=False)
+def friction_radar(appid: int) -> tuple[dict, list]:
+    """Score every friction dimension AND fetch praise quotes in ONE BigQuery round trip.
+
+    Cross-joins the game's reviews against all query vectors at once, giving an exact
+    COUNTIF over the *full* negative set (no top-k truncation) plus the three closest
+    snippets per theme. Each probe carries the polarity it wants, so the positive praise
+    lookup rides along instead of costing a second query.
+    Returns ({dim: {...}}, praise_texts); ({}, []) when nothing is indexed.
     """
+    probes = [(d, text, False) for d, text in RADAR_DIMS.items()]
+    probes.append((_PRAISE_KEY, PRAISE_Q, True))
     struct_params = [
         bigquery.StructQueryParameter(
             None,
             bigquery.ScalarQueryParameter("dim", "STRING", d),
-            bigquery.ArrayQueryParameter("qv", "FLOAT64", embed_query(query)),
+            bigquery.ArrayQueryParameter("qv", "FLOAT64", embed_query(text)),
+            bigquery.ScalarQueryParameter("want_pos", "BOOL", want_pos),
         )
-        for d, query in RADAR_DIMS.items()
+        for d, text, want_pos in probes
     ]
     cfg = bigquery.QueryJobConfig(
         query_parameters=[bigquery.ArrayQueryParameter("dims", "STRUCT", struct_params),
                           bigquery.ScalarQueryParameter("a", "INT64", int(appid))],
         maximum_bytes_billed=3 * 1024 ** 3)
     sql = f"""
-        WITH neg AS (
-          SELECT text, embedding FROM {T('review_vectors')}
-          WHERE appid = @a AND voted_up = FALSE
+        WITH v AS (
+          SELECT text, embedding, voted_up FROM {T('review_vectors')} WHERE appid = @a
         ),
         scored AS (
-          SELECT q.dim AS dim, neg.text AS text,
-                 ML.DISTANCE(neg.embedding, q.qv, 'COSINE') AS dist
-          FROM neg CROSS JOIN UNNEST(@dims) AS q
+          SELECT q.dim AS dim, v.text AS text,
+                 ML.DISTANCE(v.embedding, q.qv, 'COSINE') AS dist
+          FROM v CROSS JOIN UNNEST(@dims) AS q
+          WHERE v.voted_up = q.want_pos
         )
         SELECT dim,
                COUNTIF(dist < {STRONG_DIST}) AS strong,
@@ -564,14 +572,17 @@ def friction_radar(appid: int) -> dict:
     try:
         df = _client().query(sql, job_config=cfg).to_dataframe()
     except Exception:
-        return {}
+        return {}, []
     if df.empty:
-        return {}
+        return {}, []
     total = int(df.iloc[0].total_vec)
-    return {r.dim: {"level": radar_level(int(r.strong), total),
+    rows = {r.dim: {"level": radar_level(int(r.strong), total),
                     "n": int(r.strong),
+                    "share": 100.0 * int(r.strong) / total if total else 0.0,
                     "texts": [str(t) for t in r.texts]}
             for r in df.itertuples()}
+    praise = rows.pop(_PRAISE_KEY, {}).get("texts", [])
+    return rows, praise
 
 
 def _log_usage(event: str, game: str, appid: int):
@@ -684,13 +695,37 @@ def _pick_game(label: str):
 
 
 # ---------------------------------------------------------------- Person-Game Fit
-with tab_buy:
+@st.fragment
+def person_game_fit(my_rhythm, my_goal, my_device, my_hours, my_dims):
+    """Rendered as a fragment: changing the game reruns ONLY this block.
+
+    Streamlit re-executes every tab body on each interaction, so picking a game used to
+    re-serialise the 10k-row ownership table and the alerts table as well. Parameters are
+    named after the sidebar globals so the body reads identically either way.
+    """
     names_df = q(f"""SELECT appid, game FROM {T('game_scores')}
                      WHERE game IS NOT NULL ORDER BY n_reviews DESC LIMIT 20000""")
-    labels = (names_df["game"] + "  (#" + names_df["appid"].astype(str) + ")").tolist()
-    pick = st.selectbox("Select a game to test your personal fit (top 20,000 games)",
-                        labels, index=None, key="game_pick",
-                        placeholder="e.g., Cyberpunk 2077 / Overwatch 2 / ELDEN RING")
+    all_labels = names_df["game"] + "  (#" + names_df["appid"].astype(str) + ")"
+    # Handing the widget all 20,000 options costs ~709 KB of JSON per rerun and was the
+    # main source of the lag. Filter server-side and send a short list instead.
+    term = st.text_input("Find a game", key="game_search",
+                         placeholder="Type a game name — e.g. Elden Ring, Hades, Rust")
+    pool = all_labels
+    if term.strip():
+        pool = all_labels[names_df["game"].str.contains(
+            re.escape(term.strip()), case=False, na=False)]
+    opts = pool.head(50).tolist()
+    current = st.session_state.get("game_pick")
+    if current and current not in opts:
+        # A selected value must stay among the options or Streamlit raises — but append
+        # it, never prepend: putting the previous pick above fresh search results makes
+        # the top match the game you already had.
+        opts = opts + [current]
+    labels = all_labels           # featured-button validity is checked against the full set
+    pick = st.selectbox("Select a game to test your personal fit", opts, index=None,
+                        key="game_pick", placeholder="Pick one of the matches")
+    if term.strip() and len(pool) > 50:
+        st.caption(f"Showing the 50 most-reviewed of {len(pool):,} matches — refine the search to narrow it.")
 
     # Inline live-search fallback — visible immediately (no accordion), hidden once a game is picked.
     if not pick:
@@ -745,25 +780,32 @@ with tab_buy:
         # ---- Friction Radar: all dimensions in ONE round trip.
         #      Red flags are derived from the same pass (no duplicate searches). ----
         with st.spinner("Profiling player sentiment across friction dimensions..."):
-            radar = friction_radar(appid)
+            radar, praise_texts = friction_radar(appid)
         red_flags = [d for d in my_dims
                      if radar.get(d) and radar[d]["level"].startswith("High")]
 
         fit_title, fit_desc, fit_color = fit_verdict(row.score_live, red_flags)
 
         with panel():
-            c_img, c_m = st.columns([1, 3])
+            c_img, c_m, c_g = st.columns([1.1, 2.2, 1.1])
             c_img.image(f"https://cdn.cloudflare.steamstatic.com/steam/apps/{appid}/header.jpg",
                         use_container_width=True)
             with c_m:
                 st.markdown(verdict_badge(fit_title, fit_desc, fit_color), unsafe_allow_html=True)
-                m1, m2, m3 = st.columns(3)
-                m1.metric("Rating Score", f"{row.score_live:.0f}/100")
+                m2, m3 = st.columns(2)
                 m2.metric("Recent 90-Day Rating",
                           "—" if pd.isna(row.recent_pos_rate_live) else f"{row.recent_pos_rate_live:.0f}%",
                           delta=None if (pd.isna(row.recent_pos_rate_live) or pd.isna(row.raw_pos_rate))
                           else f"{row.recent_pos_rate_live - row.raw_pos_rate:+.0f}% vs overall")
                 m3.metric("Reviews Analyzed", f"{int(row.n_reviews_total):,}")
+            with c_g:
+                st.plotly_chart(score_gauge(row.score_live, fit_color),
+                                use_container_width=True,
+                                config={"displayModeBar": False})
+                st.markdown('<div style="text-align:center;margin-top:-14px;color:#7c8ba1;'
+                            'font-size:0.7rem;letter-spacing:0.09em;text-transform:uppercase;'
+                            'font-weight:600;">Purchase confidence</div>',
+                            unsafe_allow_html=True)
             if (not pd.isna(row.recent_pos_rate_live)
                     and row.score_live - row.recent_pos_rate_live > 15):
                 st.warning("Recent 90-day sentiment is running more than 15 points below the "
@@ -804,20 +846,27 @@ with tab_buy:
                 ranked = sorted(
                     radar.items(),
                     key=lambda kv: {"High Risk": 0, "Moderate Risk": 1, "Low Risk": 2}[kv[1]["level"]])
-                chips = "".join(risk_chip(d, v["level"], d in my_dims) for d, v in ranked)
-                st.markdown(f'<div style="margin-bottom:10px;">{chips}</div>',
-                            unsafe_allow_html=True)
-                if my_dims:
-                    st.caption("★ marks the dealbreakers from your profile.")
+                c_plot, c_list = st.columns([1.15, 1])
+                with c_plot:
+                    fig = radar_figure(radar, my_dims)
+                    if fig is not None:
+                        st.plotly_chart(fig, use_container_width=True,
+                                        config={"displayModeBar": False})
+                with c_list:
+                    chips = "".join(risk_chip(d, v["level"], d in my_dims) for d, v in ranked)
+                    st.markdown(f'<div style="margin:6px 0 4px;">{chips}</div>',
+                                unsafe_allow_html=True)
+                    st.caption("Dotted rings on the chart are the Moderate (1%) and High (3%) "
+                               "thresholds."
+                               + (" ★ marks your dealbreakers." if my_dims else ""))
 
                 col_love, col_quit = st.columns(2)
-                praise = vsearch(appid, PRAISE_Q, k=10, polarity=True)
                 with col_love:
                     st.markdown("**What fans praise**")
-                    if praise.empty:
+                    if not praise_texts:
                         st.caption("No positive review evidence indexed.")
                     else:
-                        for t in praise["text"].head(3):
+                        for t in praise_texts[:3]:
                             st.markdown(f"> {snippet(t)}")
                 with col_quit:
                     st.markdown("**What critics hit hardest**")
@@ -872,7 +921,15 @@ with tab_buy:
             daily = daily.set_index("day").sort_index()
             daily = daily.reindex(pd.date_range(daily.index.min(), daily.index.max(), freq="D"))
             daily.index.name = "day"
-            daily["pos_pct"] = daily["pos_rate"].rolling(7, min_periods=1).mean() * 100
+            # A decade of daily points is ~4,700 rows embedded in the Vega spec, twice.
+            # Roll long histories up to weeks: same shape, ~7x less to ship and draw.
+            if len(daily) > 900:
+                daily = daily.resample("W").agg({"n": "sum", "pos_rate": "mean"})
+                smoothing = "weekly average"
+            else:
+                daily["pos_rate"] = daily["pos_rate"].rolling(7, min_periods=1).mean()
+                smoothing = "7-day average"
+            daily["pos_pct"] = daily["pos_rate"] * 100
             daily["n"] = daily["n"].fillna(0)
             daily = daily.reset_index()
 
@@ -884,11 +941,11 @@ with tab_buy:
                                             on="mouseover", empty=False)
                 tips = [alt.Tooltip("day:T", title="Date"),
                         alt.Tooltip("pos_pct:Q", title="Positive rate %", format=".1f"),
-                        alt.Tooltip("n:Q", title="Reviews that day", format=",")]
+                        alt.Tooltip("n:Q", title="Reviews", format=",")]
                 base = alt.Chart(daily).encode(x=x_enc)
                 line = base.mark_line(color=CHART_ACCENT, strokeWidth=2).encode(
                     y=alt.Y("pos_pct:Q", scale=alt.Scale(zero=False),
-                            axis=alt.Axis(title="Positive rate (%) · 7-day average")))
+                            axis=alt.Axis(title=f"Positive rate (%) · {smoothing}")))
                 # Invisible until hovered: a crosshair-style readout without ink noise.
                 marks = base.mark_point(color=CHART_ACCENT, size=70, filled=True).encode(
                     y=alt.Y("pos_pct:Q"), tooltip=tips,
@@ -897,7 +954,9 @@ with tab_buy:
                                 use_container_width=True, theme=None)
 
                 vol = alt.Chart(daily).mark_bar(color=CHART_MUTED, cornerRadiusEnd=2).encode(
-                    x=x_enc, y=alt.Y("n:Q", axis=alt.Axis(title="Reviews per day")),
+                    x=x_enc, y=alt.Y("n:Q", axis=alt.Axis(
+                        title="Reviews per week" if smoothing.startswith("weekly")
+                        else "Reviews per day")),
                     tooltip=tips)
                 st.altair_chart(chart_theme(vol.properties(height=130)),
                                 use_container_width=True, theme=None)
@@ -906,9 +965,19 @@ with tab_buy:
 
         with panel():
             section("Live Verification", eyebrow="Straight from Steam",
-                    sub="Fetched live, so a game's current mood can be compared with the snapshot.")
-            live_panel(appid,
-                       None if pd.isna(row.recent_pos_rate_live) else float(row.recent_pos_rate_live))
+                    sub="Compare this game's mood right now against the snapshot above.")
+            # Three blocking HTTP calls (~2s, up to 30s if Steam is slow) used to run on
+            # every game switch — the intermittent "stuck switching". Now opt-in.
+            if st.button("Check Steam right now", key=f"live_{appid}",
+                         use_container_width=True):
+                live_panel(appid, None if pd.isna(row.recent_pos_rate_live)
+                           else float(row.recent_pos_rate_live))
+            else:
+                st.caption("Queries the public Steam API on demand — takes a second or two.")
+
+
+with tab_buy:
+    person_game_fit(my_rhythm, my_goal, my_device, my_hours, my_dims)
 
 # ---------------------------------------------------------------- Bombing Alert
 with tab_alert:
@@ -1150,6 +1219,69 @@ def _use_example(ex: str):
     st.session_state["nl_pending"] = ex
 
 
+_DIM_SHORT = {
+    "Monetization & MTX": "Monetisation", "Low-End PC Performance": "Low-end PC",
+    "Bugs & Stability": "Bugs", "Server & Disconnects": "Servers",
+    "Short Content": "Short content", "Repetitive Grind": "Grind",
+    "Steam Deck & Controller": "Steam Deck",
+}
+
+
+def radar_figure(radar: dict, my_dims: list):
+    """Polar view of complaint prevalence. Dotted rings mark the Moderate/High thresholds,
+    so the shape is read against a scale instead of by area alone."""
+    dims = [d for d in RADAR_DIMS if d in radar]
+    if not dims:
+        return None
+    vals = [radar[d]["share"] for d in dims]
+    theta = [_DIM_SHORT.get(d, d) + (" ★" if d in my_dims else "") for d in dims]
+    top = max(max(vals) * 1.3, HIGH_SHARE * 100 * 1.6)
+
+    fig = go.Figure()
+    for lvl, col in ((MODERATE_SHARE * 100, "#facc15"), (HIGH_SHARE * 100, "#f87171")):
+        fig.add_trace(go.Scatterpolar(
+            r=[lvl] * (len(dims) + 1), theta=theta + theta[:1], mode="lines",
+            line=dict(color=col, width=1, dash="dot"), hoverinfo="skip"))
+    ring_colors = [_RISK_COLOR[radar[d]["level"]] for d in dims]
+    fig.add_trace(go.Scatterpolar(
+        r=vals + vals[:1], theta=theta + theta[:1], mode="lines+markers", fill="toself",
+        fillcolor="rgba(56,189,248,0.16)", line=dict(color=CHART_ACCENT, width=2),
+        marker=dict(size=9, color=ring_colors + ring_colors[:1]),
+        hovertemplate="%{theta}<br>%{r:.1f}% of reviews<extra></extra>"))
+    fig.update_layout(
+        polar=dict(
+            bgcolor="rgba(0,0,0,0)",
+            # nticks keeps the radial labels sparse; the default ladder of ~9 values
+            # stacks diagonally across the middle and collides with the polygon.
+            radialaxis=dict(range=[0, top], ticksuffix="%", showline=False, nticks=4,
+                            angle=90, tickangle=0,
+                            gridcolor="rgba(255,255,255,0.09)",
+                            tickfont=dict(size=9, color="#64748b")),
+            angularaxis=dict(gridcolor="rgba(255,255,255,0.09)",
+                             tickfont=dict(size=11, color="#cbd5e1"))),
+        showlegend=False, height=340, margin=dict(l=70, r=70, t=26, b=26),
+        paper_bgcolor="rgba(0,0,0,0)", font=dict(family="Plus Jakarta Sans"))
+    return fig
+
+
+def score_gauge(score: float, color: str):
+    """Bands mirror the documented verdict thresholds (>=70 strong, >=40 moderate)."""
+    fig = go.Figure(go.Indicator(
+        mode="gauge+number", value=float(score),
+        number=dict(valueformat=".0f", font=dict(size=34, color="#f8fafc")),
+        gauge=dict(
+            # Tick labels clip against the arc ends; the bands plus the number carry it.
+            axis=dict(range=[0, 100], tickwidth=0, showticklabels=False),
+            bar=dict(color=color, thickness=0.3), bgcolor="rgba(255,255,255,0.04)",
+            borderwidth=0,
+            steps=[dict(range=[0, 40], color="rgba(248,113,113,0.10)"),
+                   dict(range=[40, 70], color="rgba(250,204,21,0.10)"),
+                   dict(range=[70, 100], color="rgba(74,222,128,0.10)")])))
+    fig.update_layout(height=165, margin=dict(l=12, r=12, t=8, b=0),
+                      paper_bgcolor="rgba(0,0,0,0)", font=dict(family="Plus Jakarta Sans"))
+    return fig
+
+
 with tab_ask:
     ask_mode = st.radio("Mode", ["Explore Data Insights", "Ask About Reviews"],
                         horizontal=True, label_visibility="collapsed")
@@ -1294,7 +1426,7 @@ with tab_comp:
                 FROM {T('game_composition')} c
                 JOIN {T('v_scores_live')} s ON c.appid = s.appid
                 ORDER BY s.n_reviews_total DESC
-                LIMIT 10000
+                LIMIT 1000
             """)
         st.dataframe(
             comp_df,
