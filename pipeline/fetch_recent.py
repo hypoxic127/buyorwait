@@ -24,7 +24,7 @@ import pandas as pd
 import requests
 from google.cloud import bigquery
 
-PROJECT = os.environ.get("GCP_PROJECT")
+PROJECT = (os.environ.get("GCP_PROJECT") or "").split()[0] if os.environ.get("GCP_PROJECT") else None
 DATASET = os.environ.get("BQ_DATASET", "steam_intel")
 TOP_N = int(os.environ.get("TOP_N", 2000))
 RECENT_DAYS = int(os.environ.get("RECENT_DAYS", 90))
@@ -45,7 +45,8 @@ T_SCORES = f"{PROJECT}.{DATASET}.game_scores"
 def target_appids() -> list[int]:
     manual = os.environ.get("APPIDS")
     if manual:
-        return [int(x) for x in manual.split(",") if x.strip()]
+        import re
+        return [int(x) for x in re.split(r"[,\s]+", manual) if x.strip()]
     q = f"""SELECT appid FROM `{T_SCORES}`
             ORDER BY n_reviews DESC LIMIT {TOP_N}"""
     return [r.appid for r in bq.query(q).result()]

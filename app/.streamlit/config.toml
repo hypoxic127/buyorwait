@@ -1,0 +1,9 @@
+[theme]
+base = "dark"
+primaryColor = "#66c0f4"              # Steam blue
+backgroundColor = "#0e1621"
+secondaryBackgroundColor = "#1b2838"  # Steam dark navy
+textColor = "#e6eef5"
+
+[browser]
+gatherUsageStats = false
