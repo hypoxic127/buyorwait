@@ -183,6 +183,19 @@ def _client() -> bigquery.Client:
     return bigquery.Client(project=PROJECT)
 
 
+@st.cache_resource
+def _genai_client():
+    """Long-lived Gemini client, defined up here because the tab bodies below run at
+    import time and call it. Must be cached rather than built per call: a throwaway
+    `_genai_client().models.generate_content(...)` leaves the Client unreferenced, it is
+    finalized mid-request, and the call dies with 'the client has been closed'."""
+    key = os.environ.get("GEMINI_API_KEY")
+    from google import genai as _gm
+    return (_gm.Client(api_key=key) if key else
+            _gm.Client(vertexai=True, project=PROJECT,
+                       location=os.environ.get("VERTEX_LOCATION", "global")))
+
+
 @st.cache_data(ttl=600, show_spinner="Querying BigQuery...")
 def q(sql: str, **params) -> pd.DataFrame:
     cfg = bigquery.QueryJobConfig(query_parameters=[
@@ -700,11 +713,7 @@ with tab_buy:
                 ev_p = "\n".join(f"- {t[:200]}" for t in pros["text"].head(8))
                 ev_c = "\n".join(f"- {t[:200]}" for t in cons["text"].head(8))
                 try:
-                    from google import genai as _genai_mod
-                    key = os.environ.get("GEMINI_API_KEY")
-                    _gc = (_genai_mod.Client(api_key=key) if key else
-                           _genai_mod.Client(vertexai=True, project=PROJECT,
-                                             location=os.environ.get("VERTEX_LOCATION", "global")))
+                    _gc = _genai_client()
                     verdictmd = _gc.models.generate_content(
                         model=GEMINI_MODEL,
                         contents=(f"Analyze player reviews for '{row.game}' specifically considering a user with profile:\n"
@@ -881,12 +890,29 @@ Tables:
    appid INT64, game STRING, score_live FLOAT64 (0-100), raw_pos_rate FLOAT64,
    recent_n_live INT64, recent_pos_rate_live FLOAT64, n_reviews_total INT64,
    last_review_day DATE.
+6. {T('game_composition')} — how players acquired each game (~33k games).
+   appid INT64, n FLOAT64 (reviews considered), purchase_pct FLOAT64 (0-100, bought
+   directly), free_pct FLOAT64 (0-100, free or gift key), ea_pct FLOAT64 (0-100,
+   reviewed during Early Access).
+   IMPORTANT: this table has NO game name — always JOIN to {T('v_scores_live')}
+   or {T('game_scores')} on appid to get the title.
 
 Rules:
 - Output exactly ONE BigQuery Standard SQL SELECT (or WITH ... SELECT) statement — no markdown, no comments, no explanation.
 - Read-only. Never generate INSERT/UPDATE/DELETE/DDL.
 - Match game names case-insensitively: LOWER(game) LIKE '%...%'.
 - End with LIMIT 100 unless the question implies a different limit.
+- Results are shown straight to Steam players, so alias EVERY output column with a
+  descriptive name: AS game_name, AS total_reviews, AS positive_pct — never leave raw
+  names like raw_pos_rate or n exposed. Do not select appid unless explicitly asked.
+- Aliases MUST be plain BigQuery identifiers: letters, digits and underscores only.
+  NEVER put a space, %, /, or any other punctuation in an alias — BigQuery rejects the
+  query outright. Use positive_pct, not `Positive %`. The app prettifies headers itself.
+- Round percentages and scores to one decimal.
+- Data window: the review snapshot ends 2023-10-30 and only ~1,900 games get the nightly
+  Steam sync, so date filters near "today" return little for most games. Prefer the
+  all-time and 90-day fields on {T('v_scores_live')} over hand-rolled CURRENT_DATE()
+  windows unless the user explicitly asks about recent activity.
 """
 
 _WRITE_KEYWORDS = re.compile(
@@ -904,11 +930,7 @@ def guard_sql(sql: str) -> str | None:
 
 @st.cache_data(ttl=600, show_spinner="Gemini is writing SQL...")
 def nl_to_sql(question: str) -> str:
-    from google import genai
-    key = os.environ.get("GEMINI_API_KEY")
-    client = (genai.Client(api_key=key) if key else
-              genai.Client(vertexai=True, project=PROJECT,
-                           location=os.environ.get("VERTEX_LOCATION", "global")))
+    client = _genai_client()
     resp = client.models.generate_content(
         model=GEMINI_MODEL, contents=f"{SCHEMA_PROMPT}\nQuestion: {question}\nSQL:")
     sql = resp.text.strip()
@@ -922,6 +944,82 @@ def run_sql(sql: str) -> pd.DataFrame:
     return _client().query(sql, job_config=cfg).to_dataframe()
 
 
+@st.cache_data(ttl=600, show_spinner="Gemini is reading player reviews...")
+def rag_answer(appid: int, game_label: str, question: str) -> tuple[str, str]:
+    """Answer from real reviews. Cached, so a rerun triggered by ANY widget on ANY tab
+    replays the stored answer instead of re-billing a Gemini call."""
+    ev = vsearch(int(appid), question, k=12)
+    if ev.empty:
+        return ("", "")
+    numbered = "\n".join(
+        f"[{i + 1}] ({'Positive' if v else 'Negative'}, {h:.0f}h played) {str(t)[:250]}"
+        for i, (t, v, h) in enumerate(zip(ev["text"], ev["voted_up"], ev["playtime_h"])))
+    client = _genai_client()
+    ans = client.models.generate_content(
+        model=GEMINI_MODEL,
+        contents=(f"Answer the question using ONLY these player reviews of '{game_label}'. "
+                  f"Cite like [3]. If evidence is mixed, say so. Max 120 words.\n"
+                  f"REVIEWS:\n{numbered}\nQUESTION: {question}\nANSWER:")).text
+    return (ans, numbered)
+
+
+GEMINI_BUDGET = 5
+
+
+def _budget_left() -> int:
+    return GEMINI_BUDGET - len(st.session_state.get("asked", []))
+
+
+def _register(question: str) -> bool:
+    """Charge the session budget once per *distinct question*. Re-asking something is
+    free because the answer is served from cache — the old code charged once per script
+    rerun, so unrelated clicks (even on other tabs) silently burned the quota."""
+    asked = st.session_state.setdefault("asked", [])
+    if question in asked:
+        return True
+    if len(asked) >= GEMINI_BUDGET:
+        return False
+    asked.append(question)
+    return True
+
+
+def prettify_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """snake_case -> Title Case headers. BigQuery aliases must be plain identifiers, so
+    the model returns positive_pct and we turn it into 'Positive %' here for display."""
+    def nice(col) -> str:
+        s = re.sub(r"_(pct|percent)$", "_%", str(col))
+        parts = [p for p in s.split("_") if p]
+        return " ".join(p if p == "%" else p.capitalize() for p in parts) or str(col)
+    return df.rename(columns={c: nice(c) for c in df.columns})
+
+
+def auto_chart(df: pd.DataFrame):
+    """Bar chart when the answer is obviously chartable — one label column, at least one
+    number, few enough rows to read. Returns None when a table says it better."""
+    if df.empty or len(df) > 25:
+        return None
+    nums = df.select_dtypes("number").columns.tolist()
+    labels = [c for c in df.columns if c not in nums]
+    if len(labels) != 1 or not nums:
+        return None
+    label, value = labels[0], nums[0]
+    # Explicit field= form: aliased headers contain spaces, which break shorthand parsing.
+    return chart_theme(
+        alt.Chart(df).mark_bar(color=CHART_ACCENT, cornerRadiusEnd=3).encode(
+            x=alt.X(field=value, type="quantitative", axis=alt.Axis(title=value)),
+            y=alt.Y(field=label, type="nominal", axis=alt.Axis(title=None),
+                    sort=alt.EncodingSortField(field=value, op="max", order="descending")),
+            tooltip=[alt.Tooltip(field=c,
+                                 type="quantitative" if c in nums else "nominal")
+                     for c in df.columns],
+        ).properties(height=min(30 * len(df) + 40, 520)))
+
+
+def _use_example(ex: str):
+    st.session_state["nl_q_input"] = ex
+    st.session_state["nl_pending"] = ex
+
+
 with tab_ask:
     ask_mode = st.radio("Mode", ["Explore Data Insights", "Ask About Reviews"],
                         horizontal=True, label_visibility="collapsed")
@@ -930,77 +1028,105 @@ with tab_ask:
                           WHERE game IS NOT NULL ORDER BY n_reviews DESC LIMIT 300""")
         rag_pick = st.selectbox("Game", (names_rag["game"] + "  (#" +
                                          names_rag["appid"].astype(str) + ")").tolist(),
-                                index=None, placeholder="Pick an indexed game (top 300)")
-        rag_q = st.text_input("Your question about this game",
-                              placeholder="e.g., I have 30 mins a night. Will this feel like a second job?")
-        used_r = st.session_state.get("gemini_calls", 0)
-        if rag_pick and rag_q and used_r < 5:
-            st.session_state["gemini_calls"] = used_r + 1
-            rag_appid = int(rag_pick.rsplit("#", 1)[1].rstrip(")"))
-            ev = vsearch(rag_appid, rag_q, k=12)
-            if ev.empty:
-                st.info("No indexed reviews for this game.")
+                                index=None, placeholder="Pick a game (top 300 by reviews)")
+        # A form means the question only fires on submit — not on every script rerun.
+        with st.form("rag_form"):
+            rag_q = st.text_input("Your question about this game",
+                                  placeholder="e.g., I have 30 mins a night. Will this feel like a second job?")
+            rag_go = st.form_submit_button("Ask", type="primary")
+        if rag_go:
+            if not rag_pick:
+                st.info("Pick a game first, then ask.")
+            elif not rag_q.strip():
+                st.info("Type a question about this game, then press Ask.")
+            elif _register(f"rag::{rag_pick}::{rag_q.strip()}"):
+                st.session_state["rag_active"] = (rag_pick, rag_q.strip())
             else:
-                numbered = "\n".join(f"[{i+1}] ({'Positive' if v else 'Negative'}, {h:.0f}h played) {t[:250]}"
-                                     for i, (t, v, h) in enumerate(
-                                         zip(ev["text"], ev["voted_up"], ev["playtime_h"])))
-                try:
-                    from google import genai as _gm
-                    key = os.environ.get("GEMINI_API_KEY")
-                    _gc2 = (_gm.Client(api_key=key) if key else
-                            _gm.Client(vertexai=True, project=PROJECT,
-                                       location=os.environ.get("VERTEX_LOCATION", "global")))
-                    ans = _gc2.models.generate_content(
-                        model=GEMINI_MODEL,
-                        contents=(f"Answer the question using ONLY these player reviews of "
-                                  f"'{rag_pick}'. Cite like [3]. If evidence is mixed, say so. "
-                                  f"Max 120 words.\nREVIEWS:\n{numbered}\n"
-                                  f"QUESTION: {rag_q}\nANSWER:")).text
+                st.warning(f"You've used all {GEMINI_BUDGET} questions this session — "
+                           "refresh the page to start over.")
+        rag_active = st.session_state.get("rag_active")
+        if rag_active:
+            g_label, g_question = rag_active
+            try:
+                ans, numbered = rag_answer(
+                    int(g_label.rsplit("#", 1)[1].rstrip(")")), g_label, g_question)
+            except Exception as e:
+                st.error("Gemini is unavailable right now — the snapshot data above is unaffected.")
+                with st.expander("Technical details"):
+                    st.write(str(e))
+            else:
+                if not ans:
+                    st.info("We don't have indexed reviews for this game yet.")
+                else:
+                    st.markdown(f"**You asked:** {g_question}")
                     st.markdown(ans)
-                    with st.expander("Evidence Reviews"):
+                    with st.expander("The player reviews behind this answer"):
                         st.text(numbered)
-                    st.caption("AI searches real player reviews and answers using direct player feedback.")
-                except Exception as e:
-                    st.error(f"Gemini unavailable: {e}")
-        elif rag_pick and rag_q:
-            st.warning("Ask-Gemini session limit (5) reached — refresh for a new session.")
+        st.caption(f"{_budget_left()} of {GEMINI_BUDGET} questions left this session.")
+
     if ask_mode == "Explore Data Insights":
-        st.caption(f"Ask questions in plain English — Gemini ({GEMINI_MODEL}) writes BigQuery queries to answer:")
+        st.caption("Ask anything about the review data in plain English — no SQL, no filters.")
         examples = [
             "Top 10 games by recommendation score with at least 100k reviews",
             "Which 5 games had the most review-bombing days, and when was the latest?",
-            "Show games with recent rating higher than overall average",
+            "Which games have the highest share of free or gift-key reviews?",
         ]
-        cols = st.columns(len(examples))
-        for col, ex in zip(cols, examples):
-            if col.button(ex, use_container_width=True):
-                st.session_state["nl_question"] = ex
-        question = st.text_input("Your question", key="nl_question",
-                                 placeholder="e.g., Which games recovered from a bad launch?")
-        used = st.session_state.get("gemini_calls", 0)
-        if question and used >= 5:
-            st.warning("Ask-Gemini limit for this session (5 questions) reached — refresh the page for a new session.")
-            question = None
-        if question:
-            st.session_state["gemini_calls"] = used + 1
+        for col, ex in zip(st.columns(len(examples)), examples):
+            col.button(ex, use_container_width=True, on_click=_use_example, args=(ex,))
+        with st.form("nl_form"):
+            question = st.text_input("Your question", key="nl_q_input",
+                                     placeholder="e.g., Which games recovered from a bad launch?")
+            nl_go = st.form_submit_button("Ask", type="primary")
+        # An example button submits directly; otherwise wait for the form's own button.
+        pending = st.session_state.pop("nl_pending", None)
+        asked_now = pending or (question.strip() if (nl_go and question.strip()) else None)
+        if asked_now:
+            if _register(f"nl::{asked_now}"):
+                st.session_state["nl_active"] = asked_now
+            else:
+                st.warning(f"You've used all {GEMINI_BUDGET} questions this session — "
+                           "refresh the page to start over.")
+        active_q = st.session_state.get("nl_active")
+        if active_q:
             try:
-                sql = nl_to_sql(question)
+                sql = nl_to_sql(active_q)
             except Exception as e:
-                st.error(f"Gemini is not available: {e}")
+                st.error("Gemini is unavailable right now, so we couldn't build that answer.")
+                with st.expander("Technical details"):
+                    st.write(str(e))
             else:
                 err = guard_sql(sql)
-                with st.expander("Generated SQL Query", expanded=False):
-                    st.code(sql, language="sql")
                 if err:
-                    st.error(err)
+                    st.error("That question produced an unsafe query, so we didn't run it. "
+                             "Try rephrasing it.")
                 else:
                     try:
                         out = run_sql(sql)
                     except Exception as e:
-                        st.error(f"BigQuery rejected the query: {e}")
+                        st.error("We couldn't answer that one from the data — try rephrasing, "
+                                 "or ask about scores, review counts, or bombing events.")
+                        with st.expander("Technical details"):
+                            st.write(str(e))
                     else:
-                        st.dataframe(out, use_container_width=True)
-                        st.caption(f"{len(out)} rows · query generated by {GEMINI_MODEL}.")
+                        st.markdown(f"**You asked:** {active_q}")
+                        if out.empty:
+                            st.info("No games matched that. Remember the review snapshot ends "
+                                    "2023-10-30, so very recent activity is thin.")
+                        else:
+                            shown = prettify_columns(out)
+                            ch = auto_chart(shown)
+                            if ch is not None:
+                                st.altair_chart(ch, use_container_width=True, theme=None)
+                            st.dataframe(shown, use_container_width=True, hide_index=True)
+                            c_dl, _ = st.columns([1, 3])
+                            c_dl.download_button(
+                                "Download as CSV", shown.to_csv(index=False).encode("utf-8"),
+                                file_name="buyorwait_answer.csv", mime="text/csv",
+                                use_container_width=True)
+                        # Kept for the curious, but out of the way — players want the answer.
+                        with st.expander("How we worked this out (advanced)"):
+                            st.code(sql, language="sql")
+        st.caption(f"{_budget_left()} of {GEMINI_BUDGET} questions left this session.")
 
 # ---------------------------------------------------------------- Player Composition
 @st.cache_data(ttl=3600, show_spinner=False)
