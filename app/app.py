@@ -284,8 +284,11 @@ with tab_buy:
             )
 
         # ---------------- For YOU: personal collision card ----------------
-        extra = q(f"""SELECT refund_zone_pct, pos_median_hours
-                      FROM {T('game_scores')} WHERE appid = @a""", a=appid)
+        try:  # columns land with the D4 pipeline rerun; degrade gracefully before that
+            extra = q(f"""SELECT refund_zone_pct, pos_median_hours
+                          FROM {T('game_scores')} WHERE appid = @a""", a=appid)
+        except Exception:
+            extra = pd.DataFrame()
         st.subheader("🧭 For YOU")
         red_flags = []
         if my_dims:

@@ -39,7 +39,7 @@ EPISODES_MAX = int(os.environ.get("EPISODES_MAX", 400))
 SUMMARY_MAX = int(os.environ.get("SUMMARY_MAX", 150))
 SNAPSHOT_END = pd.Timestamp(os.environ.get("SNAPSHOT_END", "2023-10-30"))
 BASELINE_DAYS = int(os.environ.get("BASELINE_DAYS", 60))
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.6-flash")
 
 STOP = set("""the and for was but not you all are this that with have has had
 they them their there its it's just like game games really only get got very
