@@ -2012,9 +2012,9 @@ def person_game_fit(my_rhythm, my_goal, my_device, my_hours, my_dims, my_style="
                         else:
                             badge_html = f'<div class="rating-badge badge-amber"><b>{score_val:.0f}/100</b> · Mixed</div>'
                         st.markdown(badge_html, unsafe_allow_html=True)
-                        st.caption(f"{int(r.n_reviews):,} reviews analyzed")
-                        st.button("Analyse Now ➔", key=f"feat_{r.appid}", type="primary", width="stretch",
-                                  on_click=_pick_game, args=(f"{r.game}  (#{r.appid})",))
+                        if st.button("Analyse Now ➔", key=f"feat_{r.appid}", type="primary", width="stretch"):
+                            st.session_state["game_pick"] = f"{r.game}  (#{r.appid})"
+                            st.rerun()
 
     hit = pd.DataFrame()
     if pick:
