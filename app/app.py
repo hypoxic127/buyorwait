@@ -812,6 +812,71 @@ def friction_radar(appid: int) -> tuple[dict, list]:
     return rows, praise
 
 
+# Words that say nothing about *why* a review is negative.
+_STOP = set("""
+a an the and or but if then than that this these those there here it its it/s is are was were be been being am
+have has had do does did doing not no nor never only own same so too very can could will would should just
+i me my we our you your he she they them their his her him us
+of in on at to for with without from by as about into onto over under after before again once during while
+what which who whom when where why how all any both each few more most other some such
+game games play played playing player players steam buy bought get got go going make made really much many lot
+even also because still back way time thing things people ive dont cant im youre theres youve didnt doesnt
+like one two first last want wanted know knew think thought feel felt say said see saw look looks looking
+seems seem actually probably maybe pretty though although quickly already another every everything something
+anything nothing someone everyone yet ever since until off out new old well end give gave take took come came
+""".split())
+# Apostrophes are stripped before the stop check so don't/you've collapse onto dont/youve.
+_TOKEN = re.compile(r"[a-z][a-z']{2,}")
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def complaint_terms(appid: int) -> pd.DataFrame:
+    """Per-month complaint keywords from this game's indexed negative reviews.
+
+    Scored by how much more often a word appears that month than across the game's
+    whole negative history, so a spike surfaces what was distinctive about it
+    ("refund", "servers") instead of words every negative review shares ("bad").
+    Returns columns month/terms; empty frame when the game has no indexed reviews.
+    """
+    try:
+        df = q(f"""SELECT day, text FROM {T('review_vectors')}
+                   WHERE appid = @a AND voted_up = FALSE AND text IS NOT NULL""",
+               a=int(appid))
+    except Exception:
+        return pd.DataFrame()
+    if df.empty:
+        return pd.DataFrame()
+
+    df["month"] = pd.to_datetime(df["day"]).values.astype("datetime64[M]")
+    # One count per review, not per mention, so a single ranting review can't dominate.
+    df["words"] = [{w for w in (m.replace("'", "")
+                                for m in _TOKEN.findall(str(t).lower()))
+                    if len(w) > 2 and w not in _STOP}
+                   for t in df["text"]]
+
+    overall: dict[str, int] = {}
+    for ws in df["words"]:
+        for w in ws:
+            overall[w] = overall.get(w, 0) + 1
+    total = max(len(df), 1)
+
+    rows = []
+    for month, grp in df.groupby("month"):
+        local: dict[str, int] = {}
+        for ws in grp["words"]:
+            for w in ws:
+                local[w] = local.get(w, 0) + 1
+        n = len(grp)
+        scored = [(w / n / ((overall[t] / total) + 0.02), t)
+                  for t, w in ((t, c) for t, c in local.items() if c >= 2)]
+        if not scored:  # too few reviews that month to rank; fall back to raw frequency
+            scored = [(c, t) for t, c in local.items()]
+        top = [t for _, t in sorted(scored, reverse=True)[:3]]
+        if top:
+            rows.append({"month": month, "terms": ", ".join(top), "neg_n": n})
+    return pd.DataFrame(rows)
+
+
 def _log_usage(event: str, game: str, appid: int):
     """Fire-and-forget usage event -> BQ (deduped per session per game)."""
     key = f"logged_{event}_{appid}"
@@ -1201,6 +1266,15 @@ def person_game_fit(my_rhythm, my_goal, my_device, my_hours, my_dims):
             daily["n"] = daily["n"].fillna(0)
             daily = daily.reset_index()
 
+            # Attach what players were actually complaining about around each point.
+            terms_df = complaint_terms(appid)
+            if not terms_df.empty:
+                daily["month"] = daily["day"].values.astype("datetime64[M]")
+                daily = daily.merge(terms_df[["month", "terms"]], on="month", how="left")
+                daily["terms"] = daily["terms"].fillna("—")
+            else:
+                daily["terms"] = "not indexed for this game"
+
             with t_time, panel():
                 section("Sentiment & Volume Over Time", eyebrow="History")
                 # Two measures on different scales -> two charts, never a dual y-axis.
@@ -1209,7 +1283,8 @@ def person_game_fit(my_rhythm, my_goal, my_device, my_hours, my_dims):
                                             on="mouseover", empty=False)
                 tips = [alt.Tooltip("day:T", title="Date"),
                         alt.Tooltip("pos_pct:Q", title="Positive rate %", format=".1f"),
-                        alt.Tooltip("n:Q", title="Reviews", format=",")]
+                        alt.Tooltip("n:Q", title="Reviews", format=","),
+                        alt.Tooltip("terms:N", title="Complaints that month")]
                 # Scroll to zoom, drag to pan. A decade on one axis is unreadable without
                 # it. Bound per chart: Vega-Lite scale binding only works on a unit spec,
                 # and vconcat (which would share one zoom) does not support autosize fit,
@@ -1229,16 +1304,22 @@ def person_game_fit(my_rhythm, my_goal, my_device, my_hours, my_dims):
                 st.altair_chart(chart_theme(alt.layer(line, marks).properties(height=240)),
                                 use_container_width=True, theme=None)
 
-                vol = alt.Chart(daily).mark_bar(color=CHART_MUTED, cornerRadiusEnd=2).encode(
+                # Area, not bars: a scale-bound zoom collapses bar marks to zero height
+                # (verified — the volume chart rendered completely empty), while an area
+                # mark zooms correctly and reads better than 700 hairline bars anyway.
+                vol = alt.Chart(daily).mark_area(
+                    color=CHART_MUTED, opacity=0.55, line={"color": CHART_MUTED}
+                ).encode(
                     x=x_enc, y=alt.Y("n:Q", axis=alt.Axis(
                         title="Reviews per week" if smoothing.startswith("weekly")
                         else "Reviews per day")),
                     tooltip=tips).add_params(zoom_vol)
                 st.altair_chart(chart_theme(vol.properties(height=130)),
                                 use_container_width=True, theme=None)
-                st.caption("Scroll to zoom, drag to pan, double-click to reset · hover a "
-                           "chart for the expand button. Reviews up to 2023-10-30 come from "
-                           "the snapshot; later days come from the nightly Steam sync.")
+                st.caption("Hover a point to see what players complained about that month · "
+                           "scroll to zoom, drag to pan, double-click to reset. Complaint "
+                           "words come from the indexed review sample; reviews up to "
+                           "2023-10-30 are from the snapshot, later days from the nightly sync.")
 
         with t_live, panel():
             section("Live Verification", eyebrow="Straight from Steam",
