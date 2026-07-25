@@ -1932,6 +1932,7 @@ def get_game_select_labels() -> list[str]:
 
 
 # ---------------------------------------------------------------- Person-Game Fit
+@st.fragment
 def person_game_fit(my_rhythm, my_goal, my_device, my_hours, my_dims, my_style="Solo Only", my_strategy="Buy Now"):
     all_labels = get_game_select_labels()
 
@@ -2012,9 +2013,9 @@ def person_game_fit(my_rhythm, my_goal, my_device, my_hours, my_dims, my_style="
                         else:
                             badge_html = f'<div class="rating-badge badge-amber"><b>{score_val:.0f}/100</b> · Mixed</div>'
                         st.markdown(badge_html, unsafe_allow_html=True)
-                        if st.button("Analyse Now ➔", key=f"feat_{r.appid}", type="primary", width="stretch"):
-                            st.session_state["game_pick"] = f"{r.game}  (#{r.appid})"
-                            st.rerun()
+                        st.caption(f"{int(r.n_reviews):,} reviews analyzed")
+                        st.button("Analyse Now ➔", key=f"feat_{r.appid}", type="primary", width="stretch",
+                                  on_click=_pick_game, args=(f"{r.game}  (#{r.appid})",))
 
     hit = pd.DataFrame()
     if pick:
