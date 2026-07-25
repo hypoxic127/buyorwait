@@ -9,3 +9,5 @@ kaggle.json
 service-account*.json
 .env
 CLAUDE.md
+# Ad-hoc query/debug scripts — useful locally, not part of the project
+scratch/

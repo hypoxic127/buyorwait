@@ -780,11 +780,16 @@ def _genai_client():
 
 @st.cache_data(ttl=600, show_spinner=False)
 def q(sql: str, **params) -> pd.DataFrame:
-    cfg = bigquery.QueryJobConfig(query_parameters=[
-        bigquery.ScalarQueryParameter(k, "STRING" if isinstance(v, str) else "FLOAT64"
-                                      if isinstance(v, float) else "INT64", v)
-        for k, v in params.items()
-    ])
+    cfg = bigquery.QueryJobConfig(
+        query_parameters=[
+            bigquery.ScalarQueryParameter(k, "STRING" if isinstance(v, str) else "FLOAT64"
+                                          if isinstance(v, float) else "INT64", v)
+            for k, v in params.items()
+        ],
+        # Every internal query runs through here. The queries are hand-written, but a
+        # bad edit or a view that stops pruning partitions would otherwise scan the
+        # whole dataset unbilled-capped. The Gemini path has its own 1 GB cap.
+        maximum_bytes_billed=4 * 1024 ** 3)
     return _client().query(sql, job_config=cfg).to_dataframe()
 
 
@@ -867,9 +872,16 @@ def personal_fit(score, radar, med_hours, refund_pct, rhythm, goal, device, hour
                 d = -15 if lvl == "High Risk" else -7
                 factors.append((f"Competitive ({_DIM_SHORT.get(comp_dim, comp_dim)})", d, f"{lvl.lower()} issue for competitive play"))
     elif style.startswith("Solo"):
-        for comp_dim in ["Story & Content Volume", "Gameplay & Controls"]:
-            if comp_dim in radar and radar[comp_dim]["level"] == "Low Risk":
-                factors.append(("Solo play buffer", 4, f"strong {comp_dim.lower()} supports immersive solo play"))
+        # Awarded once, not once per dimension. The loop used to append an identically
+        # labelled +4 for each qualifying dimension, so a solo player silently got +8 —
+        # and fit_factors_html's dedupe missed it because it keys on (label, delta,
+        # reason) and the reason differed per dimension.
+        solo_ok = [d for d in ("Story & Content Volume", "Gameplay & Controls")
+                   if d in radar and radar[d]["level"] == "Low Risk"]
+        if solo_ok:
+            factors.append(("Solo play buffer", 4, "strong "
+                            + " and ".join(_DIM_SHORT.get(d, d).lower() for d in solo_ok)
+                            + " supports immersive solo play"))
 
     # Purchase Strategy adjustments
     if strategy.startswith("Wait for Sale"):
@@ -1040,16 +1052,6 @@ def resolve_game_appid(title: str, raw_appid: int = None) -> int:
 
 # ---- Live check: today's sentiment straight from the public Steam Web API ----
 STEAM_HDRS = {"User-Agent": "BuyOrWait/1.0 (hackathon demo)"}
-
-
-@st.cache_data(ttl=300, show_spinner="Searching Steam live...")
-def steam_search(term: str) -> pd.DataFrame:
-    r = requests.get("https://store.steampowered.com/api/storesearch/",
-                     params={"term": term, "l": "english", "cc": "US"},
-                     headers=STEAM_HDRS, timeout=10)
-    r.raise_for_status()
-    apps = [it for it in r.json().get("items", []) if it.get("type") == "app"]
-    return pd.DataFrame([{"appid": it["id"], "game": it["name"]} for it in apps])
 
 
 @st.cache_data(ttl=300, show_spinner="Contacting Steam API...")
@@ -1339,7 +1341,19 @@ def score_gauge(score: float, color: str):
     fig.update_layout(height=200, margin=dict(l=10, r=10, t=10, b=6),
                       paper_bgcolor="rgba(0,0,0,0)", font=dict(family="Plus Jakarta Sans"))
     return fig
-STRONG_DIST = 0.45      # optimal cosine distance threshold for high-precision text vector matches
+# Cosine distance below which a review is genuinely about the theme. Calibrated by
+# reading real matches per distance band, not guessed: up to ~0.30 the matches are on
+# topic ("game runs at 100% of my i7 cpu, terribly optimized" for Performance); past it
+# they are not ("Bad battle AI, dumbed down combat" at 0.32, and at 0.41 a review
+# reading "Terrible optimisation" matched *Story & Content*.)
+#
+# This was briefly 0.45, which measured across the corpus admitted 92% of ALL negative
+# reviews as "Gameplay & Controls" complaints and 96% as matching some theme. Ranking
+# still worked, because every game inflated together — but the share shown to the user
+# ("raised in 92% of reviews") became false, and HIGH_FLOOR/MODERATE_FLOOR below stopped
+# binding at all since every theme cleared them. Don't raise it without re-reading the
+# bands.
+STRONG_DIST = 0.30
 
 # Grading is relative to each theme's own corpus distribution, not a flat share.
 HIGH_PCTL = 90.0        # worse than 9 games in 10 -> High Risk
@@ -1351,7 +1365,7 @@ MODERATE_FLOOR = 0.5
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
-def radar_baseline_v3() -> dict:
+def radar_baseline() -> dict:
     """Per-theme distribution of complaint prevalence across every indexed game.
 
     A single flat threshold cannot grade these axes. Measured over all 349 indexed
@@ -1446,7 +1460,7 @@ _PRAISE_KEY = "__praise__"
 
 
 @st.cache_data(ttl=600, show_spinner=False)
-def friction_radar_v6(appid: int) -> tuple[dict, list]:
+def friction_radar(appid: int) -> tuple[dict, list]:
     """Score dual-polarity (praise + complaint) resonance across 8 universal dimensions."""
     probes = []
     for d in RADAR_DIMS:
@@ -1512,7 +1526,7 @@ def friction_radar_v6(appid: int) -> tuple[dict, list]:
     recent_patches = dev_news.get("recent_180d_patches", 0)
 
     total = int(df.iloc[0].total_vec)
-    base = radar_baseline_v3()
+    base = radar_baseline()
     counts = {r.dim: {"strong": int(r.strong), "texts": [str(t) for t in r.texts]} for r in df.itertuples()}
 
     rows = {}
@@ -1931,6 +1945,73 @@ def get_game_select_labels() -> list[str]:
     return (names_df["game"] + "  (#" + names_df["appid"].astype(str) + ")").tolist()
 
 
+def render_friction_radar(radar: dict, praise_texts: list, my_dims: list):
+    """The Friction Radar sub-tab. Extracted from person_game_fit, which had grown to
+    322 lines of interleaved data access and layout; this block only ever needed the
+    three values in its signature."""
+    section("Player Friction Radar", eyebrow="What actually goes wrong",
+            sub="Each theme ranked against every other indexed game — because "
+                "raw complaint rates aren't comparable between themes.")
+    if not radar:
+        st.caption("Not enough indexed reviews to profile player friction for this game.")
+        return
+
+    # Worst level first, then most unusual within a level, so the headline below picks
+    # the theme a buyer should actually worry about.
+    ranked = sorted(
+        radar.items(),
+        key=lambda kv: ({"High Risk": 0, "Moderate Risk": 1, "Low Risk": 2}[kv[1]["level"]],
+                        -kv[1]["pctl"]))
+    top_dim, top_val = ranked[0]
+    if top_val["level"] == "Low Risk":
+        st.success(f"Nothing stands out. The loudest theme is {top_dim.lower()}, "
+                   f"raised in {top_val['share']:.1f}% of reviews — "
+                   f"{rank_phrase(top_val['pctl'])}.")
+    else:
+        st.markdown(f"**Biggest friction: {top_dim}** — raised in "
+                    f"{top_val['share']:.1f}% of this game's reviews, "
+                    f"**{rank_phrase(top_val['pctl'])}**.")
+
+    c_plot, c_list = st.columns([1.15, 1])
+    with c_plot:
+        fig = radar_figure(radar, my_dims)
+        if fig is not None:
+            # No mode bar: under Streamlit 1.58 the plotly modebar container renders
+            # empty even with displayModeBar forced True, and plotly elements get no
+            # Streamlit fullscreen button either — verified in the browser, so don't
+            # retry this. The radar is eight labelled points against fixed reference
+            # rings, so it reads at one size; the dense time series is where zooming
+            # actually matters.
+            st.plotly_chart(fig, width="stretch",
+                            config={"displayModeBar": False, "staticPlot": True})
+    with c_list:
+        st.markdown(" ".join(risk_chip(d, v["level"], d in my_dims) for d, v in ranked))
+        st.caption("The bright ring is the typical game: inside it this game draws "
+                   "fewer complaints on that theme than most, outside it draws more. "
+                   "Hover any point for the raw share."
+                   + (" A star marks your dealbreakers." if my_dims else ""))
+
+    col_love, col_quit = st.columns(2)
+    with col_love:
+        st.markdown("**What fans praise**")
+        if not praise_texts:
+            st.caption("No positive review evidence indexed.")
+        else:
+            st.caption("Top positive feedback from community reviews:")
+            for t in praise_texts[:3]:
+                st.markdown(f"> {snippet(t)}")
+    with col_quit:
+        st.markdown("**What critics hit hardest**")
+        neg_texts = top_val.get("texts", [])[:3] if top_val else []
+        if not neg_texts:
+            st.caption("No critical review evidence indexed.")
+        else:
+            st.caption("Top critical feedback on "
+                       f"**{_DIM_SHORT.get(top_dim, top_dim)}**:")
+            for t in neg_texts:
+                st.markdown(f"> {snippet(t)}")
+
+
 # ---------------------------------------------------------------- Person-Game Fit
 @st.fragment
 def person_game_fit(my_rhythm, my_goal, my_device, my_hours, my_dims, my_style="Solo Only", my_strategy="Buy Now"):
@@ -2040,7 +2121,7 @@ def person_game_fit(my_rhythm, my_goal, my_device, my_hours, my_dims, my_style="
         </div>
         """, unsafe_allow_html=True)
 
-        radar, praise_texts = friction_radar_v6(appid)
+        radar, praise_texts = friction_radar(appid)
         daily, smoothing = daily_series(appid)
         try:
             extra = q(f"""SELECT refund_zone_pct, pos_median_hours
@@ -2135,68 +2216,7 @@ def person_game_fit(my_rhythm, my_goal, my_device, my_hours, my_dims, my_style="
 
         # ---- Player Friction Radar: real per-game signal (replaces static filler) ----
         with t_radar, panel():
-            section("Player Friction Radar", eyebrow="What actually goes wrong",
-                    sub="Each theme ranked against every other indexed game — because "
-                        "raw complaint rates aren't comparable between themes.")
-            if not radar:
-                st.caption("Not enough indexed reviews to profile player friction for this game.")
-            else:
-                # Worst level first, then most unusual within a level, so the headline
-                # below picks the theme a buyer should actually worry about.
-                ranked = sorted(
-                    radar.items(),
-                    key=lambda kv: ({"High Risk": 0, "Moderate Risk": 1, "Low Risk": 2}[kv[1]["level"]],
-                                    -kv[1]["pctl"]))
-                top_dim, top_val = ranked[0]
-                if top_val["level"] == "Low Risk":
-                    st.success(f"Nothing stands out. The loudest theme is {top_dim.lower()}, "
-                               f"raised in {top_val['share']:.1f}% of reviews — "
-                               f"{rank_phrase(top_val['pctl'])}.")
-                else:
-                    st.markdown(
-                        f"**Biggest friction: {top_dim}** — raised in "
-                        f"{top_val['share']:.1f}% of this game's reviews, "
-                        f"**{rank_phrase(top_val['pctl'])}**.")
-                c_plot, c_list = st.columns([1.15, 1])
-                with c_plot:
-                    fig = radar_figure(radar, my_dims)
-                    if fig is not None:
-                        # No mode bar: under Streamlit 1.58 the plotly modebar container
-                        # renders empty even with displayModeBar forced True, and plotly
-                        # elements get no Streamlit fullscreen button either — verified in
-                        # the browser, so don't retry this. The radar is eight labelled
-                        # points against fixed reference rings, so it reads at one size;
-                        # the dense time series is where zooming actually matters.
-                        st.plotly_chart(fig, width="stretch",
-                                        config={"displayModeBar": False, "staticPlot": True})
-                with c_list:
-                    st.markdown(" ".join(risk_chip(d, v["level"], d in my_dims)
-                                         for d, v in ranked))
-                    st.caption(
-                        "The bright ring is the typical game: inside it this game draws "
-                        "fewer complaints on that theme than most, outside it draws more. "
-                        "Hover any point for the raw share."
-                        + (" A star marks your dealbreakers." if my_dims else ""))
-
-                col_love, col_quit = st.columns(2)
-                with col_love:
-                    st.markdown("**What fans praise**")
-                    if not praise_texts:
-                        st.caption("No positive review evidence indexed.")
-                    else:
-                        st.caption("Top positive feedback from community reviews:")
-                        for t in praise_texts[:3]:
-                            st.markdown(f"> {snippet(t)}")
-                with col_quit:
-                    st.markdown("**What critics hit hardest**")
-                    top_dim_name, top_dim_val = ranked[0]
-                    neg_texts = top_dim_val.get("texts", [])[:3] if top_dim_val else []
-                    if not neg_texts:
-                        st.caption("No critical review evidence indexed.")
-                    else:
-                        st.caption(f"Top critical feedback on **{_DIM_SHORT.get(top_dim_name, top_dim_name)}**:")
-                        for t in neg_texts:
-                            st.markdown(f"> {snippet(t)}")
+            render_friction_radar(radar, praise_texts, my_dims)
 
         if not daily.empty:
             with t_time, panel():
@@ -2485,13 +2505,28 @@ def guard_sql(sql: str) -> str | None:
 
 @st.cache_data(ttl=600, show_spinner=False)
 def nl_to_sql(question: str) -> str:
-    q_norm = question.strip().lower()
-    if "most review-bombing days" in q_norm or "review-bombing" in q_norm:
-        return f"SELECT a.appid, a.game AS game_name, COUNT(*) AS bombing_days, MAX(DATE(a.date)) AS latest_bombing_date FROM {T('alerts')} a GROUP BY a.appid, a.game ORDER BY bombing_days DESC LIMIT 5"
-    if "top 10 games by recommendation score" in q_norm or "100k reviews" in q_norm:
-        return f"SELECT appid, game AS game_name, score_live AS score, n_reviews_total AS total_reviews FROM {T('v_scores_live')} WHERE n_reviews_total >= 100000 ORDER BY score_live DESC LIMIT 10"
-    if "free or gift-key reviews" in q_norm or "free_pct" in q_norm:
-        return f"SELECT s.appid, s.game AS game_name, c.free_pct AS free_key_pct, s.n_reviews_total AS total_reviews FROM {T('game_composition')} c JOIN {T('v_scores_live')} s ON c.appid = s.appid WHERE s.n_reviews_total >= 10000 ORDER BY c.free_pct DESC LIMIT 10"
+    # Canned answers for the three example-buttons, so the demo path never depends on
+    # a model round trip. Matched on the FULL question, not a substring: a bare
+    # `"review-bombing" in q_norm` also swallowed "which games recovered after a
+    # review-bombing?" and answered a different question with total confidence.
+    q_norm = " ".join(question.strip().lower().split()).rstrip("?")
+    canned = {
+        "which 5 games had the most review-bombing days, and when was the latest":
+            f"SELECT a.appid, a.game AS game_name, COUNT(*) AS bombing_days, "
+            f"MAX(DATE(a.date)) AS latest_bombing_date FROM {T('alerts')} a "
+            f"GROUP BY a.appid, a.game ORDER BY bombing_days DESC LIMIT 5",
+        "top 10 games by recommendation score with at least 100k reviews":
+            f"SELECT appid, game AS game_name, score_live AS score, "
+            f"n_reviews_total AS total_reviews FROM {T('v_scores_live')} "
+            f"WHERE n_reviews_total >= 100000 ORDER BY score_live DESC LIMIT 10",
+        "which games have the highest share of free or gift-key reviews":
+            f"SELECT s.appid, s.game AS game_name, c.free_pct AS free_key_pct, "
+            f"s.n_reviews_total AS total_reviews FROM {T('game_composition')} c "
+            f"JOIN {T('v_scores_live')} s ON c.appid = s.appid "
+            f"WHERE s.n_reviews_total >= 10000 ORDER BY c.free_pct DESC LIMIT 10",
+    }
+    if q_norm in canned:
+        return canned[q_norm]
 
     client = _genai_client()
     resp = client.models.generate_content(
