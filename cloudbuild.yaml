@@ -1,0 +1,52 @@
+steps:
+  # Step 1: CodeMender Security & Quality Automated Audit via Vertex AI
+  - name: 'python:3.11-slim'
+    id: 'codemender-security-audit'
+    entrypoint: 'python'
+    args:
+      - '-c'
+      - |
+        import os, sys
+        from google import genai
+        
+        print("=== [CI/CD] CodeMender Security Audit Started ===")
+        
+        conventions = ""
+        if os.path.exists(".codemender/conventions.md"):
+            with open(".codemender/conventions.md", "r", encoding="utf-8") as f:
+                conventions = f.read()
+
+        with open("pipeline/fetch_recent.py", "r", encoding="utf-8") as f:
+            code = f.read()
+
+        prompt = f"""You are Google CodeMender Security Agent in Cloud Build CI/CD.
+        Audit this python pipeline against Team Conventions and SAST Security Policies.
+        
+        [TEAM CONVENTIONS]
+        {conventions}
+        
+        [CODE TO AUDIT]
+        {code}
+        
+        Output 'PASS' if compliant, or detailed SAST Patch instructions if security/quality issues exist.
+        """
+        
+        client = genai.Client(vertexai=True, project="${_GCP_PROJECT}", location="global")
+        res = client.models.generate_content(model="gemini-3.5-flash", contents=prompt)
+        print(res.text)
+
+  # Step 2: Build Pipeline Container
+  - name: 'gcr.io/cloud-builders/docker'
+    id: 'build-fetch-container'
+    args: ['build', '-t', 'asia-southeast1-docker.pkg.dev/${_GCP_PROJECT}/cloud-run-source-deploy/buyorwait-fetch:latest', 'pipeline']
+
+  # Step 3: Push Image to Artifact Registry
+  - name: 'gcr.io/cloud-builders/docker'
+    id: 'push-fetch-container'
+    args: ['push', 'asia-southeast1-docker.pkg.dev/${_GCP_PROJECT}/cloud-run-source-deploy/buyorwait-fetch:latest']
+
+substitutions:
+  _GCP_PROJECT: 'buyorwait-2026'
+
+options:
+  logging: CLOUD_LOGGING_ONLY
