@@ -8,6 +8,7 @@ Environment variables: GCP_PROJECT (required), BQ_DATASET (default: steam_intel)
   Ask Gemini tab: GEMINI_API_KEY (Google AI Studio key), or leave unset to use
   Vertex AI with the runtime service account (GEMINI_MODEL / VERTEX_LOCATION optional)
 """
+import bisect
 import os
 import re
 from contextlib import contextmanager
@@ -349,9 +350,11 @@ def personal_fit(score, radar, med_hours, refund_pct, rhythm, goal, device, hour
             factors.append(("Early drop-off", d,
                             f"{refund_pct:.0f}% quit inside the refund window"))
 
-    # Hardware: use measured complaint prevalence on the matching dimension.
-    hw_dim = {"Low-end PC": "Low-End PC Performance",
-              "Steam Deck": "Steam Deck & Controller"}.get(device)
+    # Hardware: use measured complaint prevalence on the matching dimension. There is
+    # deliberately no Steam Deck entry — the corpus median for that theme was 0.00% and
+    # one game in 349 cleared 3%, so the old mapping handed every single game a "low
+    # complaints on this hardware" bonus that the reviews never actually supported.
+    hw_dim = {"Low-end PC": "Low-End PC Performance"}.get(device)
     if hw_dim and hw_dim in radar:
         lvl = radar[hw_dim]["level"]
         d = {"High Risk": -22, "Moderate Risk": -9}.get(lvl, 3)
@@ -545,14 +548,22 @@ def vsearch(appid: int, query: str, k: int = 20, polarity: bool | None = None) -
         return pd.DataFrame()
 
 
+# Order is the spoke order on the radar: fairness/support, then technical, then
+# content/value. Measured over all 349 indexed games before being chosen (see
+# radar_baseline): each of these separates games by at least an order of magnitude.
+# "Steam Deck & Controller" used to sit here and was dropped — its median across the
+# corpus was 0.00% and exactly ONE game in 349 cleared 3%, so it was a spoke pinned at
+# zero on every radar and, worse, it handed every game a "low complaints on this
+# hardware" bonus in personal_fit that the data never supported.
 RADAR_DIMS = {
+    "Cheaters & Fair Play": "cheaters hackers aimbot wallhack ruined every match anti cheat useless",
+    "Dev Support & Updates": "developers abandoned the game no updates ignored community broken promises",
     "Monetization & MTX": "microtransactions pay to win overpriced cash grab battle pass",
-    "Low-End PC Performance": "fps drops stuttering lag poor optimization low end pc",
     "Bugs & Stability": "bugs crashes broken glitches corrupted save unplayable",
+    "Low-End PC Performance": "fps drops stuttering lag poor optimization low end pc",
     "Server & Disconnects": "servers down disconnect lag matchmaking dead online",
-    "Short Content": "too short lacking content finished in a few hours",
     "Repetitive Grind": "grindy repetitive boring farming time gated chores",
-    "Steam Deck & Controller": "steam deck controller support broken keyboard only",
+    "Short Content": "too short lacking content finished in a few hours",
 }
 
 # Canonical polarity probes — shared by the radar snippets and the AI analysis so both
@@ -606,46 +617,76 @@ def chart_theme(chart):
 
 
 _DIM_SHORT = {
+    "Cheaters & Fair Play": "Cheaters", "Dev Support & Updates": "Dev support",
     "Monetization & MTX": "Monetisation", "Low-End PC Performance": "Low-end PC",
     "Bugs & Stability": "Bugs", "Server & Disconnects": "Servers",
     "Short Content": "Short content", "Repetitive Grind": "Grind",
-    "Steam Deck & Controller": "Steam Deck",
 }
 
 
+# The fill tint follows the worst theme, so the shape's colour answers "is anything
+# actually wrong here" before you read a single label.
+_FILL = {"High Risk": "rgba(248,113,113,0.20)", "Moderate Risk": "rgba(250,204,21,0.16)",
+         "Low Risk": "rgba(74,222,128,0.13)"}
+
+
 def radar_figure(radar: dict, my_dims: list):
-    """Polar view of complaint prevalence. Dotted rings mark the Moderate/High thresholds,
-    so the shape is read against a scale instead of by area alone."""
+    """Polar view of how this game's complaint levels rank against every other game.
+
+    The radius is a percentile, not a raw share, because raw shares are not comparable
+    across themes — see radar_baseline. The bright ring at 50 is the typical game:
+    inside it this game draws fewer complaints on that theme than most, outside it
+    draws more. That one reference is what turns a small blob into a readable shape.
+    """
     dims = [d for d in RADAR_DIMS if d in radar]
     if not dims:
         return None
-    vals = [radar[d]["share"] for d in dims]
+    vals = [radar[d]["pctl"] for d in dims]
+    shares = [radar[d]["share"] for d in dims]
     theta = [_DIM_SHORT.get(d, d) + (" ★" if d in my_dims else "") for d in dims]
-    top = max(max(vals) * 1.3, HIGH_SHARE * 100 * 1.6)
+    worst = min((radar[d]["level"] for d in dims),
+                key=lambda lv: {"High Risk": 0, "Moderate Risk": 1, "Low Risk": 2}[lv])
 
     fig = go.Figure()
-    for lvl, col in ((MODERATE_SHARE * 100, "#facc15"), (HIGH_SHARE * 100, "#f87171")):
+    ring = lambda r: [r] * (len(dims) + 1)          # noqa: E731 - local shorthand
+    # The typical-game ring is drawn solid and bright; it is the one the shape is read
+    # against. The two thresholds stay dotted and recessive behind it.
+    for r, col, dash, w, name in (
+            (MODERATE_PCTL, "#facc15", "dot", 1, "top 30%"),
+            (HIGH_PCTL, "#f87171", "dot", 1, "top 10%"),
+            (50, "rgba(226,232,240,0.55)", "solid", 1.5, "typical game")):
         fig.add_trace(go.Scatterpolar(
-            r=[lvl] * (len(dims) + 1), theta=theta + theta[:1], mode="lines",
-            line=dict(color=col, width=1, dash="dot"), hoverinfo="skip"))
+            r=ring(r), theta=theta + theta[:1], mode="lines", name=name,
+            line=dict(color=col, width=w, dash=dash), hoverinfo="skip"))
     ring_colors = [_RISK_COLOR[radar[d]["level"]] for d in dims]
     fig.add_trace(go.Scatterpolar(
         r=vals + vals[:1], theta=theta + theta[:1], mode="lines+markers", fill="toself",
-        fillcolor="rgba(56,189,248,0.16)", line=dict(color=CHART_ACCENT, width=2),
-        marker=dict(size=9, color=ring_colors + ring_colors[:1]),
-        hovertemplate="%{theta}<br>%{r:.1f}% of reviews<extra></extra>"))
+        name="this game",
+        fillcolor=_FILL[worst], line=dict(color=_RISK_COLOR[worst], width=2),
+        marker=dict(size=10, color=ring_colors + ring_colors[:1],
+                    line=dict(color="rgba(11,17,28,0.9)", width=1.5)),
+        customdata=[[s, rank_phrase(v)] for s, v in
+                    zip(shares + shares[:1], vals + vals[:1])],
+        hovertemplate="<b>%{theta}</b><br>%{customdata[0]:.1f}% of this game's reviews"
+                      "<br>%{customdata[1]}<extra></extra>"))
     fig.update_layout(
         polar=dict(
             bgcolor="rgba(0,0,0,0)",
-            # nticks keeps the radial labels sparse; the default ladder of ~9 values
-            # stacks diagonally across the middle and collides with the polygon.
-            radialaxis=dict(range=[0, top], ticksuffix="%", showline=False, nticks=4,
-                            angle=90, tickangle=0,
-                            gridcolor="rgba(255,255,255,0.09)",
-                            tickfont=dict(size=9, color="#64748b")),
+            # No radial tick labels: plotly rotates them to follow the axis whatever
+            # tickangle says, so they ended up running sideways across the polygon.
+            # The legend below names the rings instead — verified in the browser.
+            radialaxis=dict(range=[0, 100], showline=False, showticklabels=False,
+                            gridcolor="rgba(255,255,255,0.09)"),
             angularaxis=dict(gridcolor="rgba(255,255,255,0.09)",
                              tickfont=dict(size=11, color="#cbd5e1"))),
-        showlegend=False, height=340, margin=dict(l=70, r=70, t=26, b=26),
+        showlegend=True,
+        # y is paper-relative and the bottom spoke's label is drawn outside the polar
+        # radius, so the legend has to clear it or the two overlap ("Grind" sat on the
+        # legend row at -0.02).
+        legend=dict(orientation="h", yanchor="top", y=-0.11, xanchor="center", x=0.5,
+                    font=dict(size=10, color="#94a3b8"), bgcolor="rgba(0,0,0,0)",
+                    itemclick=False, itemdoubleclick=False),
+        height=400, margin=dict(l=70, r=70, t=26, b=14),
         paper_bgcolor="rgba(0,0,0,0)", font=dict(family="Plus Jakarta Sans"))
     return fig
 
@@ -668,28 +709,95 @@ def score_gauge(score: float, color: str):
     fig.update_layout(height=200, margin=dict(l=10, r=10, t=10, b=6),
                       paper_bgcolor="rgba(0,0,0,0)", font=dict(family="Plus Jakarta Sans"))
     return fig
-# Prevalence thresholds — calibrated against high- vs low-friction reference games.
 STRONG_DIST = 0.30      # cosine distance below which a review is genuinely on-topic
-HIGH_SHARE = 0.03       # >=3% of a game's reviews on-topic-negative -> High Risk
-MODERATE_SHARE = 0.01   # >=1% -> Moderate Risk
+
+# Grading is relative to each theme's own corpus distribution, not a flat share.
+HIGH_PCTL = 90.0        # worse than 9 games in 10 -> High Risk
+MODERATE_PCTL = 70.0
+# ...but "unusual" is not the same as "material". Without these floors a theme almost
+# nobody complains about would flag High for a hair above nothing.
+HIGH_FLOOR = 1.0        # percent of the game's reviews
+MODERATE_FLOOR = 0.5
 
 
-def radar_level(strong: int, total_reviews: int) -> str:
-    """Grade a friction dimension by PREVALENCE rather than a raw match count.
+@st.cache_data(ttl=86400, show_spinner=False)
+def radar_baseline() -> dict:
+    """Per-theme distribution of complaint prevalence across every indexed game.
 
-    `strong` is the number of the game's negative reviews that are genuinely on-topic
-    (cosine distance < STRONG_DIST), normalized by the game's total review sample. A
-    loose distance threshold saturates — almost every game hits it for every topic —
-    whereas prevalence separates a game's real problems from generic noise.
+    A single flat threshold cannot grade these axes. Measured over all 349 indexed
+    games, "Dev Support & Updates" clears 3% of reviews in 226 of them while
+    "Server & Disconnects" clears it in 14 — so a 3% rule called two thirds of all
+    games High Risk on one axis and almost none on another, and every radar came out
+    the same shape. Grading each axis against its own corpus spread is what makes the
+    shape carry information.
+
+    Returns {dim: [101 ascending percentile boundaries]}; {} if the query fails, in
+    which case the caller falls back to raw share.
     """
-    if strong <= 0 or total_reviews <= 0:
-        return "Low Risk"
-    share = strong / total_reviews
-    if share >= HIGH_SHARE:
+    struct_params = [
+        bigquery.StructQueryParameter(
+            None,
+            bigquery.ScalarQueryParameter("dim", "STRING", d),
+            bigquery.ArrayQueryParameter("qv", "FLOAT64", embed_query(text)),
+        )
+        for d, text in RADAR_DIMS.items()
+    ]
+    cfg = bigquery.QueryJobConfig(
+        query_parameters=[bigquery.ArrayQueryParameter("dims", "STRUCT", struct_params)],
+        maximum_bytes_billed=8 * 1024 ** 3)
+    sql = f"""
+        WITH v AS (SELECT appid, embedding, voted_up FROM {T('review_vectors')}),
+        tot AS (SELECT appid, COUNT(*) AS n FROM v GROUP BY appid),
+        d AS (
+          SELECT q.dim AS dim, v.appid AS appid,
+                 COUNTIF(ML.DISTANCE(v.embedding, q.qv, 'COSINE') < {STRONG_DIST}) AS strong
+          FROM v CROSS JOIN UNNEST(@dims) AS q
+          WHERE v.voted_up = FALSE
+          GROUP BY dim, appid
+        )
+        SELECT d.dim, APPROX_QUANTILES(SAFE_DIVIDE(d.strong, t.n) * 100, 100) AS qs
+        FROM d JOIN tot t USING (appid) GROUP BY d.dim"""
+    try:
+        df = _client().query(sql, job_config=cfg).to_dataframe()
+    except Exception:
+        return {}
+    return {r.dim: [float(x) for x in r.qs] for r in df.itertuples()}
+
+
+def radar_percentile(share_pct: float, quantiles: list) -> float:
+    """Where this game's prevalence falls in the corpus, 0-100.
+
+    Midrank for ties: many games score exactly 0 on a theme, and taking the upper
+    bound would rank a game with no complaints at all above half the corpus.
+    """
+    if not quantiles:
+        return 0.0
+    lo = bisect.bisect_left(quantiles, share_pct)
+    hi = bisect.bisect_right(quantiles, share_pct)
+    return (lo + hi) / 2 / (len(quantiles) - 1) * 100
+
+
+def radar_level(share_pct: float, pctl: float) -> str:
+    """Grade a theme on how unusual it is for this game AND how material it is."""
+    if pctl >= HIGH_PCTL and share_pct >= HIGH_FLOOR:
         return "High Risk"
-    if share >= MODERATE_SHARE:
+    if pctl >= MODERATE_PCTL and share_pct >= MODERATE_FLOOR:
         return "Moderate Risk"
     return "Low Risk"
+
+
+def rank_phrase(pctl: float) -> str:
+    """Plain wording for a percentile, shared by the headline and the chart tooltip.
+
+    The top of the range needs its own words: a game that leads its axis scores 100,
+    and "more than 100% of games" is nonsense (Counter-Strike does exactly this on
+    cheating).
+    """
+    if pctl >= 99.5:
+        return "the worst of every game we've indexed"
+    if pctl <= 5:
+        return "lower than almost every game"
+    return f"more than {pctl:.0f}% of games"
 
 
 _PRAISE_KEY = "__praise__"
@@ -742,11 +850,16 @@ def friction_radar(appid: int) -> tuple[dict, list]:
     if df.empty:
         return {}, []
     total = int(df.iloc[0].total_vec)
-    rows = {r.dim: {"level": radar_level(int(r.strong), total),
-                    "n": int(r.strong),
-                    "share": 100.0 * int(r.strong) / total if total else 0.0,
-                    "texts": [str(t) for t in r.texts]}
-            for r in df.itertuples()}
+    base = radar_baseline()
+    rows = {}
+    for r in df.itertuples():
+        share = 100.0 * int(r.strong) / total if total else 0.0
+        pctl = radar_percentile(share, base.get(r.dim, []))
+        rows[r.dim] = {"level": radar_level(share, pctl),
+                       "n": int(r.strong),
+                       "share": share,
+                       "pctl": pctl,
+                       "texts": [str(t) for t in r.texts]}
     praise = rows.pop(_PRAISE_KEY, {}).get("texts", [])
     return rows, praise
 
@@ -967,12 +1080,14 @@ with st.sidebar:
     auto_dims = []
     if my_device == "Low-end PC" and "Low-End PC Performance" not in my_dims:
         auto_dims.append("Low-End PC Performance")
-    if my_device == "Steam Deck" and "Steam Deck & Controller" not in my_dims:
-        auto_dims.append("Steam Deck & Controller")
     my_dims += auto_dims
     if auto_dims:
         st.caption("Added from your hardware choice: "
                    + ", ".join(_DIM_SHORT.get(d, d) for d in auto_dims) + ".")
+    elif my_device == "Steam Deck":
+        st.caption("Steam Deck compatibility isn't scored: across all 349 indexed "
+                   "games only one drew a meaningful number of Deck complaints, so "
+                   "there is no signal here to rate — not a clean bill of health.")
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def featured_games(n: int = 5) -> pd.DataFrame:
@@ -1138,7 +1253,8 @@ def person_game_fit(my_rhythm, my_goal, my_device, my_hours, my_dims):
         # One status block for the whole cold path, instead of three anonymous spinners
         # in a row. On a cache miss this is ~5s, so naming the stage is worth it.
         with st.status(f"Analysing {row.game}…", expanded=False) as stat:
-            stat.update(label="Scoring friction across 7 themes…")
+            stat.update(label=f"Ranking {len(RADAR_DIMS)} friction themes against "
+                              "every other game…")
             radar, praise_texts = friction_radar(appid)
             stat.update(label="Reading review history…")
             daily, smoothing = daily_series(appid)
@@ -1238,13 +1354,27 @@ def person_game_fit(my_rhythm, my_goal, my_device, my_hours, my_dims):
         # ---- Player Friction Radar: real per-game signal (replaces static filler) ----
         with t_radar, panel():
             section("Player Friction Radar", eyebrow="What actually goes wrong",
-                    sub="Share of this game's reviews that complain about each theme.")
+                    sub="Each theme ranked against every other indexed game — because "
+                        "raw complaint rates aren't comparable between themes.")
             if not radar:
                 st.caption("Not enough indexed reviews to profile player friction for this game.")
             else:
+                # Worst level first, then most unusual within a level, so the headline
+                # below picks the theme a buyer should actually worry about.
                 ranked = sorted(
                     radar.items(),
-                    key=lambda kv: {"High Risk": 0, "Moderate Risk": 1, "Low Risk": 2}[kv[1]["level"]])
+                    key=lambda kv: ({"High Risk": 0, "Moderate Risk": 1, "Low Risk": 2}[kv[1]["level"]],
+                                    -kv[1]["pctl"]))
+                top_dim, top_val = ranked[0]
+                if top_val["level"] == "Low Risk":
+                    st.success(f"Nothing stands out. The loudest theme is {top_dim.lower()}, "
+                               f"raised in {top_val['share']:.1f}% of reviews — "
+                               f"{rank_phrase(top_val['pctl'])}.")
+                else:
+                    st.markdown(
+                        f"**Biggest friction: {top_dim}** — raised in "
+                        f"{top_val['share']:.1f}% of this game's reviews, "
+                        f"**{rank_phrase(top_val['pctl'])}**.")
                 c_plot, c_list = st.columns([1.15, 1])
                 with c_plot:
                     fig = radar_figure(radar, my_dims)
@@ -1252,17 +1382,19 @@ def person_game_fit(my_rhythm, my_goal, my_device, my_hours, my_dims):
                         # No mode bar: under Streamlit 1.58 the plotly modebar container
                         # renders empty even with displayModeBar forced True, and plotly
                         # elements get no Streamlit fullscreen button either — verified in
-                        # the browser, so don't retry this. The radar is seven labelled
-                        # points against fixed threshold rings, so it reads at one size;
+                        # the browser, so don't retry this. The radar is eight labelled
+                        # points against fixed reference rings, so it reads at one size;
                         # the dense time series is where zooming actually matters.
                         st.plotly_chart(fig, width="stretch",
                                         config={"displayModeBar": False})
                 with c_list:
                     st.markdown(" ".join(risk_chip(d, v["level"], d in my_dims)
                                          for d, v in ranked))
-                    st.caption("Dotted rings on the chart are the Moderate (1%) and High (3%) "
-                               "thresholds."
-                               + (" A star marks your dealbreakers." if my_dims else ""))
+                    st.caption(
+                        "The bright ring is the typical game: inside it this game draws "
+                        "fewer complaints on that theme than most, outside it draws more. "
+                        "Hover any point for the raw share."
+                        + (" A star marks your dealbreakers." if my_dims else ""))
 
                 col_love, col_quit = st.columns(2)
                 with col_love:
