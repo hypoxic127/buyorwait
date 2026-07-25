@@ -12,6 +12,7 @@ import os
 import re
 from contextlib import contextmanager
 from datetime import datetime, timezone
+from pathlib import Path
 
 import altair as alt          # bundled with Streamlit — no extra dependency
 import pandas as pd
@@ -20,32 +21,29 @@ import requests
 import streamlit as st
 from google.cloud import bigquery
 
+ASSETS = Path(__file__).parent / "assets"
 PROJECT = os.environ.get("GCP_PROJECT", "buyorwait-2026")
 DATASET = os.environ.get("BQ_DATASET", "steam_intel")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
 
 st.set_page_config(page_title="BuyOrWait — Person-to-Game Resonance Engine", page_icon="🎮", layout="wide")
 
-# Modern Glassmorphism Dark Theme CSS
+# Only what .streamlit/config.toml cannot express lives here. Fonts, radii, borders,
+# the semantic red/green/yellow palette, metric typography, dataframe chrome and the
+# sidebar surface are all set natively there — config reaches every widget, this file
+# only reaches the selectors we thought to write.
 st.markdown("""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap');
-
-html, body, [class*="css"] {
-    font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
-}
-
-/* App Background & Sleek Atmosphere */
+/* Config sets a flat backgroundColor; the depth gradient has no config equivalent. */
 .stApp {
     background: radial-gradient(circle at 50% 0%, #162033 0%, #0d121c 60%, #080b10 100%);
-    color: #e2e8f0;
 }
+header[data-testid="stHeader"] { backdrop-filter: blur(16px); }
 
-/* Top Navigation Bar & Headers */
-header[data-testid="stHeader"] {
-    background: rgba(13, 18, 28, 0.7) !important;
-    backdrop-filter: blur(16px);
-}
+/* Streamlit reserves 120px above the first element to clear the top nav, which is
+   only 56px tall — measured. Reclaim the difference so the hero starts near the fold. */
+[data-testid="stMainBlockContainer"] { padding-top: 4.5rem !important; }
+[data-testid="stSidebarUserContent"] { padding-top: 1rem; }
 
 /* Hero Title Card */
 .hero-title {
@@ -64,75 +62,34 @@ header[data-testid="stHeader"] {
     margin-bottom: 10px;
 }
 
-/* Metric Cards Styling */
-[data-testid="stMetric"] {
-    background: rgba(22, 32, 50, 0.65);
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    border-radius: 12px;
-    padding: 14px 18px;
-    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.25);
-    backdrop-filter: blur(12px);
-    transition: all 0.2s ease-in-out;
-}
-[data-testid="stMetric"]:hover {
-    transform: translateY(-2px);
-    border-color: rgba(102, 192, 244, 0.4);
-    box-shadow: 0 6px 24px rgba(102, 192, 244, 0.15);
-}
-[data-testid="stMetricValue"] {
-    font-weight: 800;
-    color: #f8fafc;
-    /* Slightly smaller than default so 4-up KPI rows fit values like a full date
-       without ellipsizing. */
-    font-size: 1.75rem;
-}
-[data-testid="stMetricLabel"] {
-    color: #94a3b8;
-    font-weight: 500;
-    font-size: 0.85rem;
-}
-
-/* Styled Tabs — target the stable BaseWeb tab hooks (data-testid="stTab" is not reliable) */
+/* Tab styling now only covers the sub-tabs inside a game view — the top-level
+   sections moved to st.navigation. They read as secondary: small and quiet. */
 [data-testid="stTabs"] button[data-baseweb="tab"] {
-    font-weight: 600;
-    font-size: 15px;
-    padding: 10px 22px;
-    border-radius: 8px;
-    color: #94a3b8;
-    background: rgba(15, 23, 42, 0.4);
-    border: 1px solid transparent;
-    transition: all 0.2s ease;
-    margin-right: 6px;
-}
-[data-testid="stTabs"] button[data-baseweb="tab"]:hover {
-    color: #e2e8f0;
-    border-color: rgba(102, 192, 244, 0.3);
-}
-[data-testid="stTabs"] button[data-baseweb="tab"][aria-selected="true"] {
-    background: linear-gradient(135deg, rgba(102, 192, 244, 0.22) 0%, rgba(56, 189, 248, 0.12) 100%);
-    color: #38bdf8;
-    border: 1px solid rgba(56, 189, 248, 0.4);
-    box-shadow: 0 4px 12px rgba(56, 189, 248, 0.15);
-}
-/* Nested (sub-)tabs read as secondary to the main nav: smaller, tighter, quieter. */
-[data-testid="stTabs"] [data-testid="stTabs"] button[data-baseweb="tab"] {
     font-size: 13px;
+    font-weight: 600;
     padding: 6px 15px;
     margin-right: 4px;
+    border-radius: 8px;
+    color: #94a3b8;
     background: rgba(15, 23, 42, 0.28);
+    transition: all 0.2s ease;
 }
-[data-testid="stTabs"] [data-testid="stTabs"] button[data-baseweb="tab"][aria-selected="true"] {
+[data-testid="stTabs"] button[data-baseweb="tab"]:hover { color: #e2e8f0; }
+[data-testid="stTabs"] button[data-baseweb="tab"][aria-selected="true"] {
     background: rgba(56, 189, 248, 0.13);
-    box-shadow: none;
+    color: #38bdf8;
+}
+[data-testid="stTabs"] [data-baseweb="tab-highlight"],
+[data-testid="stTabs"] [data-baseweb="tab-border"] {
+    background-color: transparent !important;
 }
 
-/* Sub-tab panels: keep hidden ones in normal flow, just collapsed and invisible.
+/* Keep hidden tab panels in normal flow, just collapsed and invisible.
    Streamlit hides panels with display:none, so a chart inside mounts measuring 0px
    wide; revealing the tab then makes Vega re-fit 0 -> full width, which is the
    visible "collapse then expand". In flow at height 0 the width is already correct,
-   so showing the panel changes nothing to re-measure. Scoped to a tab-panel nested
-   inside another (i.e. sub-tabs) so the heavy main tabs still skip layout entirely. */
-[data-baseweb="tab-panel"] [data-baseweb="tab-panel"][hidden] {
+   so showing the panel changes nothing to re-measure. */
+[data-baseweb="tab-panel"][hidden] {
     display: block !important;
     height: 0 !important;
     /* padding survives height:0 and would leave dead space under the sub-tabs */
@@ -143,61 +100,15 @@ header[data-testid="stHeader"] {
     visibility: hidden !important;
 }
 
-/* Hide the default red BaseWeb tab underline highlight so our pill styling reads cleanly */
-[data-testid="stTabs"] [data-baseweb="tab-highlight"],
-[data-testid="stTabs"] [data-baseweb="tab-border"] {
-    background-color: transparent !important;
-}
-
-/* Sidebar Glassmorphism */
-[data-testid="stSidebar"] {
-    background-color: rgba(13, 19, 31, 0.9);
-    backdrop-filter: blur(20px);
-    border-right: 1px solid rgba(255, 255, 255, 0.08);
-}
-
-/* Fix Streamlit Selectbox and Multiselect Text Truncation & Popover Alignment */
-[data-testid="stSidebar"] div[data-baseweb="select"] {
-    border-radius: 8px;
-}
-[data-testid="stSidebar"] div[data-baseweb="select"] * {
-    white-space: normal !important;
-    word-wrap: break-word !important;
-    font-size: 13px !important;
-}
-
-/* Expand Dropdown Popover Menu Width to Avoid Horizontal Truncation */
-div[role="listbox"] {
-    min-width: 320px !important;
-    max-width: 420px !important;
-    background: #0f172a !important;
-    border: 1px solid rgba(56, 189, 248, 0.3) !important;
-    border-radius: 8px !important;
-    box-shadow: 0 10px 25px rgba(0,0,0,0.5) !important;
-}
+/* The game picker's options are long titles; the default popover ellipsizes them. */
+div[role="listbox"] { min-width: 320px !important; max-width: 460px !important; }
 div[role="option"] {
     white-space: normal !important;
     word-wrap: break-word !important;
-    padding: 8px 12px !important;
-    font-size: 13px !important;
+    line-height: 1.35;
 }
 
-/* Streamlit Buttons */
-.stButton>button {
-    border-radius: 8px;
-    font-weight: 600;
-    background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
-    border: 1px solid rgba(255, 255, 255, 0.12);
-    color: #f1f5f9;
-    padding: 8px 16px;
-    transition: all 0.2s ease;
-}
-.stButton>button:hover {
-    border-color: #38bdf8;
-    box-shadow: 0 0 16px rgba(56, 189, 248, 0.3);
-    color: #38bdf8;
-    transform: translateY(-1px);
-}
+.stButton>button:hover { border-color: #38bdf8; color: #38bdf8; }
 
 /* Primary actions carry the accent and real weight. The prefix matches both
    stBaseButton-primary and stBaseButton-primaryFormSubmit, so the "Ask" submit —
@@ -221,13 +132,6 @@ button[data-testid^="stBaseButton-primary"]:hover {
 }
 /* Let the submit sit tight under its input instead of drifting down the form. */
 [data-testid="stFormSubmitButton"] { margin-top: 2px; }
-
-/* Dataframe styling */
-[data-testid="stDataFrame"] {
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    border-radius: 12px;
-    overflow: hidden;
-}
 
 /* ---- Panels -------------------------------------------------------------
    In Streamlit 1.58 a bordered container IS the stVerticalBlock (there is no
@@ -315,6 +219,16 @@ button[data-testid^="stBaseButton-primary"]:hover {
 }
 .sync-dot { width: 6px; height: 6px; border-radius: 50%; background: #38bdf8; }
 .sync-text { font-size: 12px; color: #94a3b8; }
+
+/* ---- Featured-game cards ------------------------------------------------
+   The title must occupy exactly one line or the cards' Analyse buttons sit at
+   different heights. Pixel-width ellipsis beats truncating by character count,
+   which cuts short names early and long ones late. */
+.card-title {
+    display: block; font-weight: 700; font-size: 0.95rem; color: #f1f5f9;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    margin: 2px 0 1px;
+}
 
 /* ---- Sidebar grouping --------------------------------------------------- */
 .side-group {
@@ -487,17 +401,23 @@ def verdict_badge(title: str, desc: str, color: str) -> str:
 
 
 _RISK_COLOR = {"High Risk": "#f87171", "Moderate Risk": "#facc15", "Low Risk": "#4ade80"}
+# config.toml sets redColor/yellowColor/greenColor to exactly the hexes above, so a
+# badge and the matching marker on the radar are literally the same red.
+_RISK_BADGE = {"High Risk": "red", "Moderate Risk": "yellow", "Low Risk": "green"}
 
 
 def risk_chip(dim: str, level: str, highlighted: bool) -> str:
-    """A compact risk pill; highlighted dims (the user's dealbreakers) get a ring and star."""
-    c = _RISK_COLOR.get(level, "#94a3b8")
-    ring = f"box-shadow:0 0 0 1px {c};" if highlighted else ""
-    star = " ★" if highlighted else ""
-    return (f'<span style="display:inline-block;background:{c}1a;border:1px solid {c}55;{ring}'
-            f'color:{c};border-radius:20px;padding:5px 12px;margin:3px;font-size:0.82rem;'
-            f'font-weight:600;">{dim}: {level}{star}</span>')
+    """One risk pill as a Streamlit markdown badge — themed by the app's semantic palette
+    instead of a hand-rolled <span>, so it tracks the theme like every other badge.
+    Dealbreakers carry a star icon."""
+    color = _RISK_BADGE.get(level, "gray")
+    star = " :material/star:" if highlighted else ""
+    return f":{color}-badge[{dim}: {level}{star}]"
 
+
+# Steam's own art and store page, used to give table rows a recognisable identity.
+CAPSULE = "https://cdn.cloudflare.steamstatic.com/steam/apps/{}/capsule_231x87.jpg"
+STORE = "https://store.steampowered.com/app/{}"
 
 # ---- Live check: today's sentiment straight from the public Steam Web API ----
 STEAM_HDRS = {"User-Agent": "BuyOrWait/1.0 (hackathon demo)"}
@@ -877,6 +797,87 @@ def complaint_terms(appid: int) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+@st.cache_data(ttl=600, show_spinner=False)
+def daily_series(appid: int) -> tuple[pd.DataFrame, str]:
+    """This game's sentiment/volume history, resampled and annotated once.
+
+    Pulled out of the chart block so the decision card can draw sparklines from the
+    same frame — the metrics and the big chart are then guaranteed to agree, and the
+    work happens once per game instead of once per consumer.
+    Returns (frame, smoothing_label); an empty frame when there is no history.
+    """
+    daily = q(f"""
+        SELECT day, n, SAFE_DIVIDE(pos, n) AS pos_rate
+        FROM {T('v_daily_all')} WHERE appid = @a ORDER BY day""", a=int(appid))
+    if daily.empty:
+        return daily, ""
+    daily["day"] = pd.to_datetime(daily["day"])
+    # Reindex to a continuous daily range. The snapshot ends 2023-10-30 while the
+    # nightly sync only covers recent days, so most games have a real multi-year
+    # gap. Without this the line interpolates straight across it and implies data
+    # we don't have; NaN makes Altair break the line instead. Volume is a true 0.
+    daily = daily.set_index("day").sort_index()
+    daily = daily.reindex(pd.date_range(daily.index.min(), daily.index.max(), freq="D"))
+    daily.index.name = "day"
+    # A decade of daily points is ~4,700 rows embedded in the Vega spec, twice.
+    # Roll long histories up to weeks: same shape, ~7x less to ship and draw.
+    if len(daily) > 900:
+        daily = daily.resample("W").agg({"n": "sum", "pos_rate": "mean"})
+        smoothing = "weekly average"
+    else:
+        daily["pos_rate"] = daily["pos_rate"].rolling(7, min_periods=1).mean()
+        smoothing = "7-day average"
+    daily["pos_pct"] = daily["pos_rate"] * 100
+    daily["n"] = daily["n"].fillna(0)
+    daily = daily.reset_index()
+
+    # Attach what players were actually complaining about around each point.
+    terms_df = complaint_terms(int(appid))
+    if not terms_df.empty:
+        daily["month"] = daily["day"].values.astype("datetime64[M]")
+        daily = daily.merge(terms_df[["month", "terms"]], on="month", how="left")
+        daily["terms"] = daily["terms"].fillna("—")
+    else:
+        daily["terms"] = "not indexed for this game"
+    return daily, smoothing
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def bombing_window(appid: int, center: str, days: int = 120) -> pd.DataFrame:
+    """Raw daily negative rate around one alert day — deliberately NOT the resampled
+    frame from daily_series(): a bombing is a days-long spike that weekly averaging
+    flattens into nothing."""
+    try:
+        return q(f"""
+            SELECT day, n, SAFE_DIVIDE(n - pos, n) * 100 AS neg_pct
+            FROM {T('v_daily_all')}
+            WHERE appid = @a
+              AND day BETWEEN DATE_SUB(DATE(@c), INTERVAL {int(days)} DAY)
+                          AND DATE_ADD(DATE(@c), INTERVAL {int(days)} DAY)
+            ORDER BY day""", a=int(appid), c=str(center))
+    except Exception:
+        return pd.DataFrame()
+
+
+def spark_window(daily: pd.DataFrame, points: int = 52) -> pd.DataFrame:
+    """The longest unbroken stretch of periods that actually have reviews.
+
+    Source for the metric sparklines. A plain .tail() is wrong here: the dataset has a
+    multi-year hole between the 2023 snapshot and the nightly sync, so the last 52
+    buckets are nearly all empty and the sparkline renders as a flat line with a single
+    spike at the right edge — verified in the browser before this was added.
+    """
+    if daily.empty:
+        return daily
+    live = daily[daily["n"] > 0]
+    if live.empty:
+        return live
+    step = daily["day"].diff().median()
+    # A run breaks wherever two consecutive non-empty periods sit more than 3 apart.
+    run_id = (live["day"].diff() > step * 3).cumsum()
+    return live[run_id == run_id.value_counts().idxmax()].tail(points)
+
+
 def _log_usage(event: str, game: str, appid: int):
     """Fire-and-forget usage event -> BQ (deduped per session per game)."""
     key = f"logged_{event}_{appid}"
@@ -928,32 +929,41 @@ def hero():
     """, unsafe_allow_html=True)
 
 
+st.logo(str(ASSETS / "logo.svg"), icon_image=str(ASSETS / "icon.svg"), size="large")
 hero()
 
 # ---- Sidebar: Your Life Profile & Gaming Persona -----------------------------
-with st.sidebar:
-    st.header("Your Gaming Profile")
-    st.caption("Define your life rhythm, gaming time budget, and dealbreakers to calculate personal fit.")
-    
-    my_rhythm = st.selectbox("Life Rhythm & Time Budget", [
-        "Busy (30m sessions)",
-        "Weekend (2-3h chunks)",
-        "Hardcore (10+ hrs/wk)"
-    ], index=0)
-    
-    my_goal = st.selectbox("Emotional Objective", [
-        "Decompress (Low Stress)",
-        "Challenge (Soulslike)",
-        "Story & Narrative"
-    ], index=0)
+# Pills instead of dropdowns: the whole profile is three short rows of visible choices
+# rather than three closed menus you have to open to read. The option strings are load
+# bearing — personal_fit() tests rhythm.startswith("Busy") / goal.startswith("Decompress")
+# and matches my_device exactly — so only the display text is shortened, via format_func.
+_RHYTHM_LABEL = {"Busy (30m sessions)": "Busy · 30m",
+                 "Weekend (2-3h chunks)": "Weekend · 2-3h",
+                 "Hardcore (10+ hrs/wk)": "Hardcore · 10h+"}
+_GOAL_LABEL = {"Decompress (Low Stress)": "Decompress",
+               "Challenge (Soulslike)": "Challenge",
+               "Story & Narrative": "Story"}
+_DEVICE_ICON = {"High-end PC": "High-end PC", "Low-end PC": "Low-end PC",
+                "Steam Deck": "Steam Deck"}
 
-    st.markdown('<div class="side-group">Setup</div>', unsafe_allow_html=True)
-    my_device = st.selectbox("Hardware Platform", ["High-end PC", "Low-end PC", "Steam Deck"], index=0)
-    my_hours = st.slider("Weekly Gaming Hours Budget", 1, 40, 6)
+with st.sidebar:
+    st.markdown('<div class="side-group">Your rhythm</div>', unsafe_allow_html=True)
+    my_rhythm = st.pills("Life Rhythm & Time Budget", list(_RHYTHM_LABEL),
+                         format_func=_RHYTHM_LABEL.get, default="Busy (30m sessions)",
+                         required=True, label_visibility="collapsed")
+    my_goal = st.pills("Emotional Objective", list(_GOAL_LABEL),
+                       format_func=_GOAL_LABEL.get, default="Decompress (Low Stress)",
+                       required=True, label_visibility="collapsed")
+    my_hours = st.slider("Weekly gaming hours", 1, 40, 6)
+
+    st.markdown('<div class="side-group">Hardware</div>', unsafe_allow_html=True)
+    my_device = st.pills("Hardware Platform", list(_DEVICE_ICON), default="High-end PC",
+                         required=True, label_visibility="collapsed")
 
     st.markdown('<div class="side-group">Dealbreakers</div>', unsafe_allow_html=True)
-    my_dims = st.multiselect("Personal Dealbreaker Filters", list(RADAR_DIMS), default=[],
-                             label_visibility="collapsed")
+    my_dims = st.pills("Personal Dealbreaker Filters", list(RADAR_DIMS),
+                       selection_mode="multi", format_func=lambda d: _DIM_SHORT.get(d, d),
+                       default=[], label_visibility="collapsed")
     auto_dims = []
     if my_device == "Low-end PC" and "Low-End PC Performance" not in my_dims:
         auto_dims.append("Low-End PC Performance")
@@ -961,17 +971,15 @@ with st.sidebar:
         auto_dims.append("Steam Deck & Controller")
     my_dims += auto_dims
     if auto_dims:
-        st.caption(f"Added from your hardware choice: {', '.join(auto_dims)}.")
-
-tab_buy, tab_alert, tab_ask, tab_comp = st.tabs(
-    ["Person-Game Fit", "Review Bombing & Crowd Noise", "Ask Gemini AI", "Player Ownership"])
+        st.caption("Added from your hardware choice: "
+                   + ", ".join(_DIM_SHORT.get(d, d) for d in auto_dims) + ".")
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def featured_games(n: int = 5) -> pd.DataFrame:
     """Popular games that actually have indexed review vectors, so the one-click demos
     land on a fully-populated radar instead of an empty state."""
     try:
-        return q(f"""SELECT s.game, s.appid
+        return q(f"""SELECT s.game, s.appid, s.score, s.n_reviews
                      FROM {T('game_scores')} s
                      WHERE s.game IS NOT NULL
                        AND s.appid IN (SELECT DISTINCT appid FROM {T('review_vectors')})
@@ -1077,15 +1085,24 @@ def person_game_fit(my_rhythm, my_goal, my_device, my_hours, my_dims):
         if not feat.empty:
             # Only offer games the selectbox actually contains, or setting its state would raise.
             label_set = set(labels)
-            shots = [(r.game, f"{r.game}  (#{r.appid})", r.appid) for r in feat.itertuples()]
-            shots = [s for s in shots if s[1] in label_set]
+            shots = [r for r in feat.itertuples()
+                     if f"{r.game}  (#{r.appid})" in label_set]
             if shots:
                 st.caption("Fully analysed examples — one click:")
-                for col, (name, label, aid) in zip(st.columns(len(shots)), shots):
-                    # Truncate so a long title can't wrap and break the row's alignment.
-                    col.button(name if len(name) <= 20 else name[:19] + "…",
-                               key=f"feat_{aid}", use_container_width=True,
-                               help=name, on_click=_pick_game, args=(label,))
+                # Cards, not a row of grey text buttons: the capsule art is how players
+                # recognise a game, and the score tells them what they'd be looking at.
+                # It also gives the empty state something to be, instead of whitespace.
+                cols = st.columns(len(shots), vertical_alignment="top")
+                for col, r in zip(cols, shots):
+                    # height="stretch" keeps the row level when one title wraps to two
+                    # lines; without it the cards end at different depths.
+                    with col, st.container(border=True, height="stretch"):
+                        st.image(CAPSULE.format(r.appid), width="stretch")
+                        st.markdown(f'<span class="card-title" title="{r.game}">'
+                                    f'{r.game}</span>', unsafe_allow_html=True)
+                        st.caption(f"Rating {r.score:.0f}/100 · {int(r.n_reviews):,} reviews")
+                        st.button("Analyse", key=f"feat_{r.appid}", width="stretch",
+                                  on_click=_pick_game, args=(f"{r.game}  (#{r.appid})",))
         st.caption("Not in the list, or released after our 2023 snapshot? Search Steam directly:")
         kw_live = st.text_input("Steam live search", placeholder="e.g., Black Myth: Wukong",
                                 label_visibility="collapsed")
@@ -1118,16 +1135,20 @@ def person_game_fit(my_rhythm, my_goal, my_device, my_hours, my_dims):
         row = hit.iloc[0]
         _log_usage("search", str(row.game), appid)
 
-        # ---- Friction Radar: all dimensions in ONE round trip.
-        #      Red flags are derived from the same pass (no duplicate searches). ----
-        with st.spinner("Profiling player sentiment across friction dimensions..."):
+        # One status block for the whole cold path, instead of three anonymous spinners
+        # in a row. On a cache miss this is ~5s, so naming the stage is worth it.
+        with st.status(f"Analysing {row.game}…", expanded=False) as stat:
+            stat.update(label="Scoring friction across 7 themes…")
             radar, praise_texts = friction_radar(appid)
-        # Needed before the card now: the fit score is derived from these.
-        try:
-            extra = q(f"""SELECT refund_zone_pct, pos_median_hours
-                          FROM {T('game_scores')} WHERE appid = @a""", a=appid)
-        except Exception:
-            extra = pd.DataFrame()
+            stat.update(label="Reading review history…")
+            daily, smoothing = daily_series(appid)
+            stat.update(label="Matching against your profile…")
+            try:
+                extra = q(f"""SELECT refund_zone_pct, pos_median_hours
+                              FROM {T('game_scores')} WHERE appid = @a""", a=appid)
+            except Exception:
+                extra = pd.DataFrame()
+            stat.update(label=f"{row.game} analysed", state="complete")
         _med = extra.iloc[0].pos_median_hours if not extra.empty else None
         _rz = extra.iloc[0].refund_zone_pct if not extra.empty else None
 
@@ -1136,24 +1157,43 @@ def person_game_fit(my_rhythm, my_goal, my_device, my_hours, my_dims):
             my_rhythm, my_goal, my_device, my_hours, my_dims)
 
         with panel():
-            c_img, c_m, c_g = st.columns([1.1, 2.2, 1.1])
+            c_img, c_m, c_g = st.columns([1.1, 2.2, 1.1], vertical_alignment="center")
             c_img.image(f"https://cdn.cloudflare.steamstatic.com/steam/apps/{appid}/header.jpg",
-                        use_container_width=True)
+                        width="stretch",
+                        link=f"https://store.steampowered.com/app/{appid}")
             with c_m:
                 st.markdown(verdict_badge(fit_title, fit_desc, fit_color), unsafe_allow_html=True)
                 st.markdown(fit_factors_html(fit_factors), unsafe_allow_html=True)
                 m1, m2, m3 = st.columns(3)
                 # Game quality and personal fit are separate answers — showing both is
                 # what lets "great game, wrong game for you" actually be visible.
-                m1.metric("Game Rating", f"{row.score_live:.0f}/100")
+                # Sparklines come from daily_series, the same frame the Time & Trend chart
+                # draws, so the thumbnail trend and the full chart cannot disagree. Too
+                # few points is left plain rather than drawn as a misleading stub.
+                spark = spark_window(daily)
+                sp = spark if len(spark) >= 8 else None
+                # height="stretch": only two of the three carry a sparkline and one
+                # carries a delta line, so left to "content" the cards end at three
+                # different depths.
+                m1.metric("Game Rating", f"{row.score_live:.0f}/100", border=True,
+                          height="stretch")
                 m2.metric("Recent 90-Day",
                           "—" if pd.isna(row.recent_pos_rate_live) else f"{row.recent_pos_rate_live:.0f}%",
                           delta=None if (pd.isna(row.recent_pos_rate_live) or pd.isna(row.raw_pos_rate))
-                          else f"{row.recent_pos_rate_live - row.raw_pos_rate:+.0f}% vs overall")
-                m3.metric("Reviews", f"{int(row.n_reviews_total):,}")
+                          else f"{row.recent_pos_rate_live - row.raw_pos_rate:+.0f}% vs overall",
+                          border=True, height="stretch",
+                          chart_data=None if sp is None else sp["pos_pct"],
+                          chart_type="line")
+                m3.metric("Reviews", f"{int(row.n_reviews_total):,}", border=True,
+                          height="stretch",
+                          chart_data=None if sp is None else sp["n"],
+                          chart_type="bar")
+                if sp is not None:
+                    st.caption(f"Sparklines: {len(sp)} {smoothing.split()[0]} periods of "
+                               f"review history to {sp['day'].max():%b %Y}.")
             with c_g:
                 st.plotly_chart(score_gauge(fit_score, fit_color),
-                                use_container_width=True,
+                                width="stretch",
                                 config={"displayModeBar": False})
                 st.markdown('<div style="text-align:center;margin-top:-14px;color:#7c8ba1;'
                             'font-size:0.7rem;letter-spacing:0.09em;text-transform:uppercase;'
@@ -1214,15 +1254,14 @@ def person_game_fit(my_rhythm, my_goal, my_device, my_hours, my_dims):
                         # the browser, so don't retry this. The radar is seven labelled
                         # points against fixed threshold rings, so it reads at one size;
                         # the dense time series is where zooming actually matters.
-                        st.plotly_chart(fig, use_container_width=True,
+                        st.plotly_chart(fig, width="stretch",
                                         config={"displayModeBar": False})
                 with c_list:
-                    chips = "".join(risk_chip(d, v["level"], d in my_dims) for d, v in ranked)
-                    st.markdown(f'<div style="margin:6px 0 4px;">{chips}</div>',
-                                unsafe_allow_html=True)
+                    st.markdown(" ".join(risk_chip(d, v["level"], d in my_dims)
+                                         for d, v in ranked))
                     st.caption("Dotted rings on the chart are the Moderate (1%) and High (3%) "
                                "thresholds."
-                               + (" ★ marks your dealbreakers." if my_dims else ""))
+                               + (" A star marks your dealbreakers." if my_dims else ""))
 
                 col_love, col_quit = st.columns(2)
                 with col_love:
@@ -1242,39 +1281,7 @@ def person_game_fit(my_rhythm, my_goal, my_device, my_hours, my_dims):
                         for t in neg_texts:
                             st.markdown(f"> {snippet(t)}")
 
-        daily = q(f"""
-            SELECT day, n, SAFE_DIVIDE(pos, n) AS pos_rate
-            FROM {T('v_daily_all')} WHERE appid = @a ORDER BY day""", a=appid)
         if not daily.empty:
-            daily["day"] = pd.to_datetime(daily["day"])
-            # Reindex to a continuous daily range. The snapshot ends 2023-10-30 while the
-            # nightly sync only covers recent days, so most games have a real multi-year
-            # gap. Without this the line interpolates straight across it and implies data
-            # we don't have; NaN makes Altair break the line instead. Volume is a true 0.
-            daily = daily.set_index("day").sort_index()
-            daily = daily.reindex(pd.date_range(daily.index.min(), daily.index.max(), freq="D"))
-            daily.index.name = "day"
-            # A decade of daily points is ~4,700 rows embedded in the Vega spec, twice.
-            # Roll long histories up to weeks: same shape, ~7x less to ship and draw.
-            if len(daily) > 900:
-                daily = daily.resample("W").agg({"n": "sum", "pos_rate": "mean"})
-                smoothing = "weekly average"
-            else:
-                daily["pos_rate"] = daily["pos_rate"].rolling(7, min_periods=1).mean()
-                smoothing = "7-day average"
-            daily["pos_pct"] = daily["pos_rate"] * 100
-            daily["n"] = daily["n"].fillna(0)
-            daily = daily.reset_index()
-
-            # Attach what players were actually complaining about around each point.
-            terms_df = complaint_terms(appid)
-            if not terms_df.empty:
-                daily["month"] = daily["day"].values.astype("datetime64[M]")
-                daily = daily.merge(terms_df[["month", "terms"]], on="month", how="left")
-                daily["terms"] = daily["terms"].fillna("—")
-            else:
-                daily["terms"] = "not indexed for this game"
-
             with t_time, panel():
                 section("Sentiment & Volume Over Time", eyebrow="History")
                 # Two measures on different scales -> two charts, never a dual y-axis.
@@ -1302,7 +1309,7 @@ def person_game_fit(my_rhythm, my_goal, my_device, my_hours, my_dims):
                     y=alt.Y("pos_pct:Q"), tooltip=tips,
                     opacity=alt.condition(hover, alt.value(1), alt.value(0))).add_params(hover)
                 st.altair_chart(chart_theme(alt.layer(line, marks).properties(height=240)),
-                                use_container_width=True, theme=None)
+                                width="stretch", theme=None)
 
                 # Area, not bars: a scale-bound zoom collapses bar marks to zero height
                 # (verified — the volume chart rendered completely empty), while an area
@@ -1315,7 +1322,7 @@ def person_game_fit(my_rhythm, my_goal, my_device, my_hours, my_dims):
                         else "Reviews per day")),
                     tooltip=tips).add_params(zoom_vol)
                 st.altair_chart(chart_theme(vol.properties(height=130)),
-                                use_container_width=True, theme=None)
+                                width="stretch", theme=None)
                 st.caption("Hover a point to see what players complained about that month · "
                            "scroll to zoom, drag to pan, double-click to reset. Complaint "
                            "words come from the indexed review sample; reviews up to "
@@ -1327,18 +1334,19 @@ def person_game_fit(my_rhythm, my_goal, my_device, my_hours, my_dims):
             # Three blocking HTTP calls (~2s, up to 30s if Steam is slow) used to run on
             # every game switch — the intermittent "stuck switching". Now opt-in.
             if st.button("Check Steam right now", key=f"live_{appid}",
-                         use_container_width=True):
+                         width="stretch"):
                 live_panel(appid, None if pd.isna(row.recent_pos_rate_live)
                            else float(row.recent_pos_rate_live))
             else:
                 st.caption("Queries the public Steam API on demand — takes a second or two.")
 
 
-with tab_buy:
+def page_fit():
     person_game_fit(my_rhythm, my_goal, my_device, my_hours, my_dims)
 
+
 # ---------------------------------------------------------------- Bombing Alert
-with tab_alert:
+def page_bombing():
     c1, c2 = st.columns(2)
     zmin = c1.slider("Alert Sensitivity Level", 1.0, 10.0, 3.0, 0.5)
     minn = c2.slider("Minimum Daily Reviews", 1, 200, 30, 1)
@@ -1397,32 +1405,84 @@ with tab_alert:
             LIMIT 500""", z=float(zmin), minn=int(minn))
     if alerts.empty:
         st.info("No review-bombing events match these filters — try lowering the sensitivity.")
-    else:
-        b1, b2, b3, b4 = st.columns(4)
-        b1.metric("Games Affected", f"{alerts['appid'].nunique():,}")
-        b2.metric("Total Alert Days", f"{int(alerts['alert_days'].sum()):,}")
-        b3.metric("Worst Severity (z)", f"{alerts['peak_z'].max():.1f}")
-        b4.metric("Most Recent Event", str(alerts['latest_day'].max()))
-        st.caption("Sorted by most recent. Severity z compares a day's negative rate against "
-                   "that game's own 30-day baseline, so crowd noise is separated from a real "
-                   "quality drop.")
-        st.dataframe(
-            alerts, use_container_width=True, height=460, hide_index=True,
-            column_order=("game", "why_bombed_ai", "latest_day", "alert_days",
-                          "peak_daily_reviews", "peak_neg_pct", "baseline_neg_pct", "peak_z"),
-            column_config={
-                "game": st.column_config.TextColumn("Game", width="medium"),
-                "why_bombed_ai": st.column_config.TextColumn(
-                    "Why Players Are Upset (AI Summary)", width="large"),
-                "latest_day": st.column_config.DateColumn("Latest Day"),
-                "alert_days": st.column_config.NumberColumn("Alert Days", format="%d"),
-                "peak_daily_reviews": st.column_config.NumberColumn("Peak Daily Reviews", format="%d"),
-                "peak_neg_pct": st.column_config.ProgressColumn(
-                    "Peak Negative", format="%.1f%%", min_value=0, max_value=100),
-                "baseline_neg_pct": st.column_config.ProgressColumn(
-                    "Baseline Negative", format="%.1f%%", min_value=0, max_value=100),
-                "peak_z": st.column_config.NumberColumn("Severity (z)", format="%.1f"),
-            })
+        return
+
+    b1, b2, b3, b4 = st.columns(4)
+    b1.metric("Games Affected", f"{alerts['appid'].nunique():,}", border=True)
+    b2.metric("Total Alert Days", f"{int(alerts['alert_days'].sum()):,}", border=True)
+    b3.metric("Worst Severity (z)", f"{alerts['peak_z'].max():.1f}", border=True)
+    b4.metric("Most Recent Event", str(alerts['latest_day'].max()), border=True)
+    st.caption("Select a row to see what happened. Severity z compares a day's negative "
+               "rate against that game's own 30-day baseline, so crowd noise is separated "
+               "from a real quality drop.")
+
+    alerts = alerts.assign(thumb=[CAPSULE.format(a) for a in alerts["appid"]],
+                           store=[STORE.format(a) for a in alerts["appid"]])
+    sel = st.dataframe(
+        alerts, height=440, hide_index=True,
+        key="alert_table", on_select="rerun", selection_mode="single-row",
+        column_order=("thumb", "game", "why_bombed_ai", "latest_day", "alert_days",
+                      "peak_daily_reviews", "peak_neg_pct", "baseline_neg_pct",
+                      "peak_z", "store"),
+        column_config={
+            # The capsule art is how players recognise a game — a title column alone
+            # makes 500 rows of unfamiliar names.
+            "thumb": st.column_config.ImageColumn("", width="small"),
+            "game": st.column_config.TextColumn("Game", width="medium"),
+            "why_bombed_ai": st.column_config.TextColumn(
+                "Why Players Are Upset (AI Summary)", width="large"),
+            "latest_day": st.column_config.DateColumn("Latest Day"),
+            "alert_days": st.column_config.NumberColumn("Alert Days", format="%d"),
+            "peak_daily_reviews": st.column_config.NumberColumn("Peak Daily Reviews",
+                                                                format="localized"),
+            "peak_neg_pct": st.column_config.ProgressColumn(
+                "Peak Negative", format="%.1f%%", min_value=0, max_value=100),
+            "baseline_neg_pct": st.column_config.ProgressColumn(
+                "Baseline Negative", format="%.1f%%", min_value=0, max_value=100),
+            "peak_z": st.column_config.NumberColumn("Severity (z)", format="%.1f"),
+            "store": st.column_config.LinkColumn("Steam", display_text="Open",
+                                                 width="small"),
+        })
+
+    rows = sel.selection.rows if sel is not None else []
+    if not rows:
+        st.caption("No row selected — pick one above to chart the event.")
+        return
+    ev = alerts.iloc[rows[0]]
+    with panel():
+        section(str(ev.game), eyebrow="Event detail",
+                sub=str(ev.why_bombed_ai)[:400])
+        k1, k2, k3 = st.columns(3)
+        k1.metric("Peak negative rate", f"{ev.peak_neg_pct:.1f}%",
+                  delta=f"{ev.peak_neg_pct - ev.baseline_neg_pct:+.1f} pts vs baseline",
+                  delta_color="inverse", border=True)
+        k2.metric("Peak daily reviews", f"{int(ev.peak_daily_reviews):,}", border=True)
+        k3.metric("Alert days", f"{int(ev.alert_days)}", border=True)
+
+        win = bombing_window(int(ev.appid), str(ev.latest_day))
+        if win.empty:
+            st.caption("No daily history available around this event.")
+        else:
+            win["day"] = pd.to_datetime(win["day"])
+            rule = alt.Chart(pd.DataFrame({"day": [pd.to_datetime(ev.latest_day)]})).mark_rule(
+                color="#f87171", strokeDash=[4, 4]).encode(x="day:T")
+            neg = alt.Chart(win).mark_area(
+                color="#f87171", opacity=0.28, line={"color": "#f87171"}
+            ).encode(
+                # tickCount is required: over a 240-day window the default tick density
+                # prints "May 2026" four times in a row.
+                x=alt.X("day:T", axis=alt.Axis(title=None, format="%d %b", tickCount=6)),
+                y=alt.Y("neg_pct:Q", axis=alt.Axis(title="Negative rate (%)")),
+                tooltip=[alt.Tooltip("day:T", title="Date"),
+                         alt.Tooltip("neg_pct:Q", title="Negative %", format=".1f"),
+                         alt.Tooltip("n:Q", title="Reviews", format=",")])
+            st.altair_chart(chart_theme(alt.layer(neg, rule).properties(height=200)),
+                            width="stretch", theme=None)
+            st.caption("Daily, unsmoothed, 120 days either side of the last alert day "
+                       "(dashed line) — a bombing is a days-long spike and weekly "
+                       "averaging would hide it.")
+        if isinstance(getattr(ev, "top_terms", None), str) and ev.top_terms:
+            st.markdown("**Top complaint terms:** " + ev.top_terms)
 
 # ---------------------------------------------------------------- Ask Gemini
 SCHEMA_PROMPT = f"""You translate questions about Steam game reviews into BigQuery Standard SQL.
@@ -1579,9 +1639,10 @@ def _use_example(ex: str):
     st.session_state["nl_pending"] = ex
 
 
-with tab_ask:
-    ask_mode = st.radio("Mode", ["Explore Data Insights", "Ask About Reviews"],
-                        horizontal=True, label_visibility="collapsed")
+def page_ask():
+    ask_mode = st.segmented_control(
+        "Mode", ["Explore Data Insights", "Ask About Reviews"],
+        default="Explore Data Insights", required=True, label_visibility="collapsed")
     if ask_mode == "Ask About Reviews":
         names_rag = q(f"""SELECT appid, game FROM {T('game_scores')}
                           WHERE game IS NOT NULL ORDER BY n_reviews DESC LIMIT 300""")
@@ -1631,7 +1692,7 @@ with tab_ask:
             "Which games have the highest share of free or gift-key reviews?",
         ]
         for col, ex in zip(st.columns(len(examples)), examples):
-            col.button(ex, use_container_width=True, on_click=_use_example, args=(ex,))
+            col.button(ex, width="stretch", on_click=_use_example, args=(ex,))
         with st.form("nl_form"):
             question = st.text_input("Your question", key="nl_q_input",
                                      placeholder="e.g., Which games recovered from a bad launch?")
@@ -1675,13 +1736,13 @@ with tab_ask:
                             shown = prettify_columns(out)
                             ch = auto_chart(shown)
                             if ch is not None:
-                                st.altair_chart(ch, use_container_width=True, theme=None)
-                            st.dataframe(shown, use_container_width=True, hide_index=True)
+                                st.altair_chart(ch, width="stretch", theme=None)
+                            st.dataframe(shown, hide_index=True)
                             c_dl, _ = st.columns([1, 3])
                             c_dl.download_button(
                                 "Download as CSV", shown.to_csv(index=False).encode("utf-8"),
                                 file_name="buyorwait_answer.csv", mime="text/csv",
-                                use_container_width=True)
+                                width="stretch")
                         # Kept for the curious, but out of the way — players want the answer.
                         with st.expander("How we worked this out (advanced)"):
                             st.code(sql, language="sql")
@@ -1697,7 +1758,7 @@ def composition_total() -> int:
         return 0
 
 
-with tab_comp:
+def page_ownership():
     _n_comp = composition_total()
     section("Player Ownership & Review Quality", eyebrow="Who is reviewing",
             sub="How players acquired each game — direct purchase, free / gift keys, and "
@@ -1725,25 +1786,49 @@ with tab_comp:
                 ORDER BY s.n_reviews_total DESC
                 LIMIT 1000
             """)
+        comp_df = comp_df.assign(
+            thumb=[CAPSULE.format(a) for a in comp_df["appid"]],
+            store=[STORE.format(a) for a in comp_df["appid"]])
         st.dataframe(
             comp_df,
-            use_container_width=True,
             height=480,
             hide_index=True,
-            column_order=("game", "n_reviews", "purchase_pct", "free_pct", "ea_pct"),
+            column_order=("thumb", "game", "n_reviews", "purchase_pct", "free_pct",
+                          "ea_pct", "store"),
             column_config={
+                "thumb": st.column_config.ImageColumn("", width="small"),
                 "game": st.column_config.TextColumn("Game Title", width="medium"),
-                "n_reviews": st.column_config.NumberColumn("Total Reviews", format="%d"),
+                "n_reviews": st.column_config.NumberColumn("Total Reviews", format="localized"),
                 "purchase_pct": st.column_config.ProgressColumn(
                     "Direct Purchase", format="%.1f%%", min_value=0, max_value=100),
                 "free_pct": st.column_config.ProgressColumn(
                     "Free / Gift Keys", format="%.1f%%", min_value=0, max_value=100),
                 "ea_pct": st.column_config.ProgressColumn(
                     "Early Access", format="%.1f%%", min_value=0, max_value=100),
+                "store": st.column_config.LinkColumn("Steam", display_text="Open",
+                                                     width="small"),
             }
         )
     except Exception as e:
         st.info(f"Player composition data unavailable ({e}).")
+
+
+# ---------------------------------------------------------------- Navigation
+# st.navigation, not st.tabs. With tabs, Streamlit executes EVERY tab body on every
+# interaction — picking a game on the fit page also re-ran the 1,000-row ownership
+# query and the 500-row alert table and re-serialised both to the browser. Only the
+# selected page runs here, and each section gets its own URL, so a view is linkable
+# and the browser back button works.
+_PAGES = [
+    st.Page(page_fit, title="Person-Game Fit", icon=":material/target:",
+            url_path="fit", default=True),
+    st.Page(page_bombing, title="Review Bombing", icon=":material/warning:",
+            url_path="bombing"),
+    st.Page(page_ask, title="Ask Gemini", icon=":material/auto_awesome:", url_path="ask"),
+    st.Page(page_ownership, title="Player Ownership", icon=":material/group:",
+            url_path="ownership"),
+]
+st.navigation(_PAGES, position="top").run()
 
 st.divider()
 st.caption("Data: 114M Steam Review Dataset + Live Steam Web API Sync | Powered by GCP BigQuery, Cloud Run & Gemini AI")

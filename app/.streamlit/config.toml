@@ -1,9 +1,58 @@
+# Native Streamlit theming (1.58). Everything expressible here is set here rather
+# than in app.py's CSS: config reaches EVERY widget — sliders, radios, popovers,
+# toasts, the dataframe chrome — while a stylesheet only reaches the handful of
+# selectors we happened to write, and needs !important to win. app.py keeps only
+# what has no config equivalent (the page's radial-gradient backdrop, the panel
+# surface, and a few bespoke components).
 [theme]
 base = "dark"
-primaryColor = "#66c0f4"              # Steam blue
-backgroundColor = "#0e1621"
-secondaryBackgroundColor = "#1b2838"  # Steam dark navy
-textColor = "#e6eef5"
+
+# "<family>:<url>" makes Streamlit load the webfont itself, so the app no longer
+# depends on an @import inside our stylesheet firing before first paint.
+font = "Plus Jakarta Sans:https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap, sans-serif"
+headingFont = "Plus Jakarta Sans:https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap, sans-serif"
+headingFontWeights = [800, 700, 700, 700, 600, 600]
+baseFontSize = 15
+
+primaryColor = "#38bdf8"
+backgroundColor = "#0b111c"
+secondaryBackgroundColor = "#141d2e"
+textColor = "#e2e8f0"
+linkColor = "#7dd3fc"
+linkUnderline = false
+
+borderColor = "#1e293b"
+baseRadius = "0.75rem"
+buttonRadius = "0.55rem"
+showWidgetBorder = true
+showSidebarBorder = true
+
+# st.metric: was three CSS rules on stMetricValue/stMetricLabel.
+metricValueFontSize = "1.7rem"
+metricValueFontWeight = 800
+
+dataframeHeaderBackgroundColor = "#16203285"
+dataframeBorderColor = "#1e293b"
+codeBackgroundColor = "#0d1526"
+
+# The semantic palette drives st.badge, :red-badge[…] markdown, st.error/success
+# and alert boxes. Aligning it with _RISK_COLOR in app.py means a "High Risk"
+# badge and the red marker on the radar are literally the same red.
+redColor = "#f87171"
+greenColor = "#4ade80"
+yellowColor = "#facc15"
+blueColor = "#38bdf8"
+grayColor = "#94a3b8"
+violetColor = "#a5b4fc"
+
+# Applied in order to categorical series in Altair, Vega-Lite and Plotly.
+chartCategoricalColors = ["#38bdf8", "#a5b4fc", "#4ade80", "#facc15", "#f87171", "#64748b"]
+
+[theme.sidebar]
+backgroundColor = "#0d1421"
+secondaryBackgroundColor = "#16203285"
+borderColor = "#1e293b"
+baseRadius = "0.6rem"
 
 [browser]
 gatherUsageStats = false
