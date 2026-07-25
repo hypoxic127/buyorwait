@@ -1932,7 +1932,6 @@ def get_game_select_labels() -> list[str]:
 
 
 # ---------------------------------------------------------------- Person-Game Fit
-@st.fragment
 def person_game_fit(my_rhythm, my_goal, my_device, my_hours, my_dims, my_style="Solo Only", my_strategy="Buy Now"):
     all_labels = get_game_select_labels()
 
