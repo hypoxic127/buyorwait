@@ -1284,8 +1284,13 @@ def radar_figure(radar: dict, my_dims: list):
     dims = [d for d in RADAR_DIMS if d in radar]
     if not dims:
         return None
+    # Radius is the friction percentile: bigger polygon = more friction. It briefly
+    # plotted max(18, 100 - pctl) instead — a "health" view where bigger means better —
+    # but only the radius was flipped. The panel title, the headline, the risk chips and
+    # the tooltip's "more than X% of games" all read the other way, so Portal drew a
+    # near-maximal shape while every label around it correctly said Low Risk. Keep the
+    # radius pointing the same way as the words, or flip all of them together.
     vals = [radar[d]["pctl"] for d in dims]
-    health_vals = [max(18.0, 100.0 - float(v)) for v in vals]
     shares = [radar[d]["share"] for d in dims]
     theta = [_DIM_SHORT.get(d, d) + (" ★" if d in my_dims else "") for d in dims]
     worst = min((radar[d]["level"] for d in dims),
@@ -1293,12 +1298,19 @@ def radar_figure(radar: dict, my_dims: list):
 
     fig = go.Figure()
     ring = lambda r: [r] * (len(dims) + 1)          # noqa: E731 - local shorthand
+    # The two grading thresholds, so the shape can be read against the levels the chips
+    # report rather than by area alone.
+    for lvl, col, nm in ((MODERATE_PCTL, "#facc15", "Moderate at 70%"),
+                         (HIGH_PCTL, "#f87171", "High at 90%")):
+        fig.add_trace(go.Scatterpolar(
+            r=ring(lvl), theta=theta + theta[:1], mode="lines", name=nm,
+            line=dict(color=col, width=1, dash="dot"), hoverinfo="skip"))
     fig.add_trace(go.Scatterpolar(
         r=ring(50), theta=theta + theta[:1], mode="lines", name="typical game",
-        line=dict(color="rgba(255,255,255,0.25)", width=1.5, dash="solid"), hoverinfo="skip"))
+        line=dict(color="rgba(255,255,255,0.45)", width=1.5, dash="solid"), hoverinfo="skip"))
     ring_colors = [_RISK_COLOR[radar[d]["level"]] for d in dims]
     fig.add_trace(go.Scatterpolar(
-        r=health_vals + health_vals[:1], theta=theta + theta[:1], mode="lines+markers", fill="toself",
+        r=vals + vals[:1], theta=theta + theta[:1], mode="lines+markers", fill="toself",
         name="this game",
         fillcolor=_FILL[worst], line=dict(color=_RISK_COLOR[worst], width=3),
         marker=dict(size=10, color=ring_colors + ring_colors[:1],
@@ -2038,9 +2050,10 @@ def render_friction_radar(radar: dict, praise_texts: list, my_dims: list):
                             config={"displayModeBar": False, "staticPlot": True})
     with c_list:
         st.markdown(" ".join(risk_chip(d, v["level"], d in my_dims) for d, v in ranked))
-        st.caption("The bright ring is the typical game: inside it this game draws "
-                   "fewer complaints on that theme than most, outside it draws more. "
-                   "Hover any point for the raw share."
+        st.caption("Bigger means more friction. The white ring is the typical game, so "
+                   "anything inside it draws fewer complaints on that theme than most "
+                   "games do; the dotted rings are the Moderate and High thresholds. "
+                   "Hover a point for the raw share."
                    + (" A star marks your dealbreakers." if my_dims else ""))
 
     col_love, col_quit = st.columns(2)
