@@ -1,10 +1,12 @@
 # BuyOrWait 🎮 — To Buy or Not to Buy
 
-> Steam sentiment intelligence powered by NVIDIA RAPIDS acceleration — overall rating can be misleading; recent weighted sentiment is the truth.
+> Steam sentiment intelligence powered by NVIDIA RAPIDS acceleration — the overall rating tells you whether a game is good, not whether it is good *for you*.
 
 **🔗 Live Demo:** [buyorwait-1047454501331.asia-southeast1.run.app](https://buyorwait-1047454501331.asia-southeast1.run.app) · **🎬 Demo Video (≤3 min):** [Watch Video](https://youtu.be/gSyqp_9bQL0) · **📊 Looker Studio:** [Interactive Dashboard](https://datastudio.google.com/reporting/46e5a8c2-ce33-4179-a456-5d68db932760)
 
-BuyOrWait is a purchase-decision tool built on **114M+ Steam reviews**. Steam's overall rating blends years-old sentiment with today's, hiding both games that have been fixed and games being review-bombed right now. BuyOrWait computes a playtime-weighted, 90-day half-life **Purchase Confidence Score** (🟢 Buy / 🟡 Wait / 🔴 Skip) and raises **Bombing Alerts** via rolling z-score anomaly detection — plus a **💬 Ask Gemini** tab that turns plain-English questions into BigQuery SQL, and a **🔴 Live check** that pulls today's sentiment for any game straight from the Steam Web API (even games released after the snapshot). The entire pipeline runs unchanged on CPU (pandas) and GPU (`cudf.pandas` on an NVIDIA L4): **~14× faster end-to-end (38.3s → 2.7s)** — turning bombing alerts from a daily batch into an hourly refresh. Stack: Cloud Storage + BigQuery + Cloud Run (Streamlit) + Gemini (Vertex AI) + Looker Studio + NVIDIA RAPIDS.
+BuyOrWait is a purchase-decision tool built on **114M+ Steam reviews**. Steam's overall rating blends years-old sentiment with today's, hides games that have since been fixed or review-bombed, and says nothing about whether a game suits *your* schedule, hardware or taste. BuyOrWait computes a playtime-weighted, 90-day half-life **Purchase Confidence Score**, then adjusts it into a **Personal Fit Score** against your life rhythm, weekly time budget, hardware and play style — landing on 🟢 Buy / 🟡 Wait for Sale / 🔴 Skip with every adjustment shown so you can audit it. It raises **Bombing Alerts** via rolling z-score anomaly detection with Gemini-written cause summaries, ranks eight quality dimensions against the whole corpus in a **Friction Radar**, and answers plain-English questions over both the aggregated tables and the raw review text.
+
+The entire batch pipeline runs unchanged on CPU (pandas) and GPU (`cudf.pandas` on an NVIDIA L4): **~14× faster end-to-end (38.3s → 2.7s)** — turning bombing alerts from a daily batch into an hourly refresh. Stack: Cloud Storage + BigQuery (incl. vector search) + Cloud Run (Streamlit) + Gemini (Vertex AI) + Looker Studio + NVIDIA RAPIDS.
 
 ## Architecture
 
@@ -16,13 +18,41 @@ Cloud Storage (Slim Parquet, no text columns, ~3-4GB)
 GCE g2-standard-8 (NVIDIA L4) — cudf.pandas batch processing
    Clean → Game×Day Aggregation → Weighted Confidence Score → Bombing Detection → Phase Timings
    ▼
-BigQuery: game_daily / game_scores / alerts / benchmark_results (+ v_* views for Looker)
+BigQuery
+   game_daily / game_scores / alerts / benchmark_results   (pipeline.py)
+   review_vectors  — 384-dim review embeddings + vector index (embed_index.py)
+   alert_causes    — Gemini "why was it bombed"             (attribute.py)
+   game_composition — purchase / free-key / Early-Access mix (composition.py)
+   daily_delta     — nightly Steam API top-up               (fetch_recent.py)
+   + v_* views merging snapshot with the live delta
    ▼                                    ▼
 Cloud Run — Streamlit                 Looker Studio — exec dashboard
-   🛒 Purchase Decision | 🚨 Bombing Alert | ⚡ Why GPU
-   💬 Ask Gemini — natural language → SQL via Gemini (Vertex AI), read-only guarded
-   🔴 Live check — Steam appreviews API: today's sentiment overlaid on snapshot scores
+   🎯 Person & Game Fit | 🚨 Review Bombing | 💬 Ask Gemini | 👥 Player Ownership
 ```
+
+The app queries only aggregated tables and one game's vectors at a time — never the 114M-row raw data.
+
+## Screenshots
+
+**Person & Game Fit** — your profile against the game's review consensus, with every score adjustment itemised:
+
+![Person & Game Fit](docs/PersonGameFit.png)
+
+**Friction Radar** — eight quality dimensions, each ranked against every other indexed game:
+
+![Friction Radar](docs/FrictionRadar.png)
+
+**Review Bombing** — z-score alerts with Gemini cause summaries; select a row to chart the event:
+
+![Review Bombing](docs/ReviewBombing.png)
+
+**Ask Gemini** — plain English over the data, or over the review text itself:
+
+![Ask Gemini](docs/AskGemini.png)
+
+**Player Ownership** — how each game's reviewers actually acquired it:
+
+![Player Ownership](docs/PlayerOwnership.png)
 
 ## Benchmarks
 
@@ -42,12 +72,13 @@ Hardware: GCE g2-standard-8 (8 vCPUs / 32GB RAM / NVIDIA L4 24GB), Ubuntu 24.04 
 
 ![nvidia-smi on the GCE L4 instance during the GPU run](benchmarks/nvidia-smi.png)
 
-## Screenshots
+## Metric Definitions
 
-![Purchase Decision tab](docs/Purchasedecision.png)
-![Bombing Alert tab](docs/BombingAlert.png)
-![Ask Gemini tab](docs/Askgemini.png)
-![Why GPU tab](docs/WhyGPU.png)
+- **Purchase Confidence Score** — how good the game is *in general*: `score = Σ(wᵢ·voteᵢ)/Σ(wᵢ) × 100` where `wᵢ = log(1+playtime_at_review) × exp(−age_days/90)`. Playtime weighting filters out drive-by review noise; the 90-day half-life makes recent sentiment dominate.
+- **Personal Fit Score** — how good the game is *for you*. The Purchase Confidence Score is the starting point, then the sidebar profile applies adjustments computed from real data: time-to-value (median hours to enjoyment ÷ your weekly budget), early drop-off (share quitting inside the refund window, weighted harder for short-session players), hardware, and play style. Any selected dealbreaker sitting at High Risk caps the result at 35. Every adjustment is rendered next to the verdict with its reason — the weights are transparent judgement calls, not fitted parameters. Game quality and personal fit are always shown as **separate numbers**, so "great game, wrong game for you" stays visible.
+- **Friction Radar** — eight dimensions (Performance, Gameplay, Story & Content, Visuals, Audio, Price & Value, Dev Support, Usability) scored by semantic search over the game's negative reviews, then graded **against each dimension's own distribution across every indexed game**. This matters: measured over the corpus, some themes draw complaints in two thirds of all games and others in under 5%, so a single flat threshold grades every game identically. A dimension is High Risk at ≥ 90th percentile **and** ≥ 1% of the game's reviews — the floor stops a rare theme flagging on noise.
+- **Bombing Alert** — daily negative-review-rate z-score vs the 30-day rolling baseline > 3 **and** daily review count > 2× the 30-day rolling average (dual conditions avoid false positives on small samples). Causes are summarised by Gemini from the reviews on the alert days.
+- **Data window** — the Kaggle snapshot contains reviews **through 2023-10-30**, topped up nightly for ~1.9k games via the Steam Web API. "Today" anchors to the newest review in the data, never the wall clock.
 
 ## Reproduction
 
@@ -74,40 +105,46 @@ bq load --source_format=PARQUET --replace steam_intel.game_scores out_game_score
 bq load --source_format=PARQUET --replace steam_intel.alerts      out_alerts.parquet
 bq load --source_format=CSV --autodetect --replace steam_intel.benchmark_results benchmark_results.csv
 
-# 4. App (local)
+# 4. Enrichment layers (each writes one BigQuery table; all optional but the app
+#    degrades gracefully rather than breaking if one is missing)
+python pipeline/embed_index.py     # review_vectors   — powers Friction Radar + Ask Gemini RAG
+python pipeline/attribute.py       # alert_causes     — Gemini "why was it bombed"
+python pipeline/composition.py     # game_composition — purchase / free-key / Early Access mix
+python pipeline/fetch_recent.py    # daily_delta      — nightly Steam API top-up (run on a schedule)
+
+# 5. Evergreen views that merge the 2023 snapshot with the nightly delta
+bq query --use_legacy_sql=false < docs/evergreen.sql
+
+# 6. App (local)
 cd app && pip install -r requirements.txt
 GCP_PROJECT=your_project_id streamlit run app.py
-# 💬 Ask Gemini tab: set GEMINI_API_KEY (Google AI Studio), or skip it and use
-# Vertex AI on Cloud Run (step 5) with no key at all.
+# Ask Gemini: set GEMINI_API_KEY (Google AI Studio), or skip it and use
+# Vertex AI on Cloud Run (step 7) with no key at all.
 
-# 5. Deploy to Cloud Run (uses app/Dockerfile)
-# One-time, for the Ask Gemini tab via Vertex AI (key-less):
+# 7. Deploy to Cloud Run (uses app/Dockerfile)
+# One-time, for Gemini via Vertex AI (key-less):
 #   gcloud services enable aiplatform.googleapis.com
 #   + grant the Cloud Run service account roles/aiplatform.user
 gcloud run deploy buyorwait --source app --region asia-southeast1 \
   --allow-unauthenticated --max-instances 2 \
   --set-env-vars GCP_PROJECT=your_project_id
 
-# 6. Looker Studio dashboard (optional, ~10 min) — see docs/looker_studio.md
+# 8. Looker Studio dashboard (optional)
 bq query --use_legacy_sql=false < docs/looker_views.sql
 ```
-
-The app queries only the aggregated BigQuery tables (a few thousand rows), never the 114M-row raw data — responses stay under 2 seconds on a scale-to-zero Cloud Run service.
-
-## Metric Definitions
-
-- **Purchase Confidence Score**: `score = Σ(wᵢ·voteᵢ)/Σ(wᵢ) × 100` where `wᵢ = log(1+playtime_at_review) × exp(−age_days/90)`. Playtime weight filters out "casual" review noise, and the 90-day half-life decay ensures recent sentiment dominates.
-- **Bombing Alert**: Daily negative review rate z-score (relative to 30-day rolling average) > 3, and daily review count > 2x of 30-day rolling average (dual conditions to avoid false positives on small sample sizes).
-- **Data window**: the Kaggle snapshot contains reviews **through 2023-10-30**. The pipeline anchors "today" to the newest review in the data, so "recent 90d" means the 90 days before the snapshot date. The app's **🔴 Live check** already pulls today's sentiment per game from the same public Steam Web API; streaming that feed into BigQuery is the natural next step — and the ~14× GPU speedup is exactly what makes hourly full recalculation practical.
 
 ## Repository Layout
 
 ```
-pipeline/     convert_to_parquet.py (CSV -> slim Parquet), pipeline.py (timed CPU/GPU pipeline)
-app/          Streamlit app + Dockerfile (Cloud Run)
+pipeline/     convert_to_parquet.py  CSV -> slim Parquet
+              pipeline.py            timed CPU/GPU batch pipeline (the benchmark)
+              embed_index.py         review text -> embeddings -> BigQuery vectors
+              attribute.py           Gemini cause attribution for bombing events
+              composition.py         reviewer-acquisition breakdown per game
+              fetch_recent.py        nightly Steam API incremental fetch
+app/          app.py, Dockerfile (Cloud Run), .streamlit/config.toml (native theme), assets/
 benchmarks/   benchmark_results.csv, nvidia-smi.png, hardware details
-notebooks/    eda_sample.ipynb — small-sample EDA behind the metric design
-docs/         app screenshots, Looker Studio setup guide + views SQL
+docs/         app screenshots + BigQuery view definitions (evergreen, Looker)
 ```
 
 ## License
