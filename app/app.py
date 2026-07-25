@@ -624,9 +624,28 @@ PRAISE_Q = "amazing experience totally worth it best game highly recommend"
 CRITIC_Q = "broken disappointed waste of money refund problems"
 
 
+def clean_text(text: str) -> str:
+    """Strip Kaomoji, ASCII art, repetitive symbols, and garbled characters from review text."""
+    if not text:
+        return ""
+    t = str(text)
+    # Remove BBCode tags like [h1], [/h1], [b], [/b], [i], [/i]
+    t = re.sub(r'\[/?[a-zA-Z0-9]+\]', '', t)
+    # Strip common Kaomoji / ASCII art characters & symbols: e.g. (╯°□°)╯, ಠ_ಠ, (◕‿◕), •, ﹏, 乛, ฅ, ¯
+    t = re.sub(r'[°□•﹏乛ฅ¯ノ凸ಠ‿◕≡⊙∀Δω▼▲★☆♪♫♥♠♣♦►◄═║╚╝╗╔╩╦╠═╬\(\)\\\/\^]', ' ', t)
+    # Remove repeated non-alphanumeric noise symbols
+    t = re.sub(r'[^\w\s,\.\?!\'"\-–—:;]', ' ', t)
+    # Normalize multiple whitespace
+    t = re.sub(r'\s+', ' ', t).strip()
+    return t
+
+
 def snippet(text: str, limit: int = 180) -> str:
-    """Collapse review whitespace so a quote renders on one clean blockquote line."""
-    return " ".join(str(text).split())[:limit]
+    """Clean review text and collapse whitespace for display."""
+    cleaned = clean_text(text)
+    if not cleaned:
+        return ""
+    return cleaned[:limit] + ("…" if len(cleaned) > limit else "")
 
 
 # Chart tokens. Each chart carries a single series, so identity never rides on colour
@@ -1124,8 +1143,14 @@ def person_game_fit(my_rhythm, my_goal, my_device, my_hours, my_dims):
                 with c_plot:
                     fig = radar_figure(radar, my_dims)
                     if fig is not None:
+                        # Keep the mode bar (it appears on hover) so the radar can be
+                        # zoomed and reset; displayModeBar:False left it with no zoom
+                        # affordance at all.
                         st.plotly_chart(fig, use_container_width=True,
-                                        config={"displayModeBar": False})
+                                        config={"displaylogo": False,
+                                                "displayModeBar": True,
+                                                "modeBarButtonsToRemove": [
+                                                    "select2d", "lasso2d", "toggleSpikelines"]})
                 with c_list:
                     chips = "".join(risk_chip(d, v["level"], d in my_dims) for d, v in ranked)
                     st.markdown(f'<div style="margin:6px 0 4px;">{chips}</div>',
@@ -1185,10 +1210,18 @@ def person_game_fit(my_rhythm, my_goal, my_device, my_hours, my_dims):
                 tips = [alt.Tooltip("day:T", title="Date"),
                         alt.Tooltip("pos_pct:Q", title="Positive rate %", format=".1f"),
                         alt.Tooltip("n:Q", title="Reviews", format=",")]
+                # Scroll to zoom, drag to pan. A decade on one axis is unreadable without
+                # it. Bound per chart: Vega-Lite scale binding only works on a unit spec,
+                # and vconcat (which would share one zoom) does not support autosize fit,
+                # which is what keeps these charts responsive.
+                zoom_line = alt.selection_interval(bind="scales", encodings=["x"])
+                zoom_vol = alt.selection_interval(bind="scales", encodings=["x"])
+
                 base = alt.Chart(daily).encode(x=x_enc)
                 line = base.mark_line(color=CHART_ACCENT, strokeWidth=2).encode(
                     y=alt.Y("pos_pct:Q", scale=alt.Scale(zero=False),
-                            axis=alt.Axis(title=f"Positive rate (%) · {smoothing}")))
+                            axis=alt.Axis(title=f"Positive rate (%) · {smoothing}"))
+                ).add_params(zoom_line)
                 # Invisible until hovered: a crosshair-style readout without ink noise.
                 marks = base.mark_point(color=CHART_ACCENT, size=70, filled=True).encode(
                     y=alt.Y("pos_pct:Q"), tooltip=tips,
@@ -1200,11 +1233,12 @@ def person_game_fit(my_rhythm, my_goal, my_device, my_hours, my_dims):
                     x=x_enc, y=alt.Y("n:Q", axis=alt.Axis(
                         title="Reviews per week" if smoothing.startswith("weekly")
                         else "Reviews per day")),
-                    tooltip=tips)
+                    tooltip=tips).add_params(zoom_vol)
                 st.altair_chart(chart_theme(vol.properties(height=130)),
                                 use_container_width=True, theme=None)
-                st.caption("Reviews up to 2023-10-30 come from the snapshot; later days come "
-                           "from the nightly Steam sync.")
+                st.caption("Scroll to zoom, drag to pan, double-click to reset · hover a "
+                           "chart for the expand button. Reviews up to 2023-10-30 come from "
+                           "the snapshot; later days come from the nightly Steam sync.")
 
         with t_live, panel():
             section("Live Verification", eyebrow="Straight from Steam",
@@ -1394,8 +1428,10 @@ def rag_answer(appid: int, game_label: str, question: str) -> tuple[str, str]:
     if ev.empty:
         return ("", "")
     numbered = "\n".join(
-        f"[{i + 1}] ({'Positive' if v else 'Negative'}, {h:.0f}h played) {str(t)[:250]}"
-        for i, (t, v, h) in enumerate(zip(ev["text"], ev["voted_up"], ev["playtime_h"])))
+        f"[{i + 1}] ({'Positive' if v else 'Negative'}, {h:.0f}h played) {clean_text(t)[:250]}"
+        for i, (t, v, h) in enumerate(zip(ev["text"], ev["voted_up"], ev["playtime_h"]))
+        if clean_text(t)
+    )
     client = _genai_client()
     ans = client.models.generate_content(
         model=GEMINI_MODEL,
