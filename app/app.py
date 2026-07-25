@@ -126,6 +126,23 @@ header[data-testid="stHeader"] {
     box-shadow: none;
 }
 
+/* Sub-tab panels: keep hidden ones in normal flow, just collapsed and invisible.
+   Streamlit hides panels with display:none, so a chart inside mounts measuring 0px
+   wide; revealing the tab then makes Vega re-fit 0 -> full width, which is the
+   visible "collapse then expand". In flow at height 0 the width is already correct,
+   so showing the panel changes nothing to re-measure. Scoped to a tab-panel nested
+   inside another (i.e. sub-tabs) so the heavy main tabs still skip layout entirely. */
+[data-baseweb="tab-panel"] [data-baseweb="tab-panel"][hidden] {
+    display: block !important;
+    height: 0 !important;
+    /* padding survives height:0 and would leave dead space under the sub-tabs */
+    padding: 0 !important;
+    margin: 0 !important;
+    border: 0 !important;
+    overflow: hidden !important;
+    visibility: hidden !important;
+}
+
 /* Hide the default red BaseWeb tab underline highlight so our pill styling reads cleanly */
 [data-testid="stTabs"] [data-baseweb="tab-highlight"],
 [data-testid="stTabs"] [data-baseweb="tab-border"] {
@@ -181,6 +198,29 @@ div[role="option"] {
     color: #38bdf8;
     transform: translateY(-1px);
 }
+
+/* Primary actions carry the accent and real weight. The prefix matches both
+   stBaseButton-primary and stBaseButton-primaryFormSubmit, so the "Ask" submit —
+   previously a tiny grey chip next to a full-width input — reads as the main action. */
+button[data-testid^="stBaseButton-primary"] {
+    background: linear-gradient(135deg, #38bdf8 0%, #0284c7 100%) !important;
+    border: none !important;
+    color: #06131f !important;
+    font-weight: 700 !important;
+    font-size: 0.95rem !important;
+    padding: 11px 34px !important;
+    min-width: 148px;
+    border-radius: 9px;
+    box-shadow: 0 2px 12px rgba(56, 189, 248, 0.22);
+}
+button[data-testid^="stBaseButton-primary"]:hover {
+    background: linear-gradient(135deg, #7dd3fc 0%, #38bdf8 100%) !important;
+    box-shadow: 0 5px 20px rgba(56, 189, 248, 0.4);
+    color: #06131f !important;
+    transform: translateY(-1px);
+}
+/* Let the submit sit tight under its input instead of drifting down the form. */
+[data-testid="stFormSubmitButton"] { margin-top: 2px; }
 
 /* Dataframe styling */
 [data-testid="stDataFrame"] {
