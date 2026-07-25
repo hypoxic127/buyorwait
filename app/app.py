@@ -1368,15 +1368,25 @@ MODERATE_FLOOR = 0.5
 def radar_baseline() -> dict:
     """Per-theme distribution of complaint prevalence across every indexed game.
 
-    A single flat threshold cannot grade these axes. Measured over all 349 indexed
-    games, "Dev Support & Updates" clears 3% of reviews in 226 of them while
-    "Server & Disconnects" clears it in 14 — so a 3% rule called two thirds of all
-    games High Risk on one axis and almost none on another, and every radar came out
-    the same shape. Grading each axis against its own corpus spread is what makes the
-    shape carry information.
+    Two things this has to get right.
+
+    1. Each axis is graded against its own spread, never a flat share. The themes have
+       base rates that differ by an order of magnitude, so one fixed threshold grades
+       every game identically and every radar comes out the same shape.
+
+    2. The prevalence is `negative_rate x (on-topic negatives / ALL indexed negatives)`,
+       NOT `on-topic negatives / all indexed vectors`. review_vectors is a deliberately
+       balanced sample — embed_index.py takes up to PER_GAME/2 reviews of each polarity
+       per game — so its positive/negative mix reflects the sampler, not the game.
+       Dividing by the full vector count therefore measured the sampling: Portal 2's
+       sample is 65% negative and Overwatch 2's is 39%, the inverse of reality, and the
+       radar ranked the best-rated games as the most troubled. Measured over 349 games,
+       the worst-axis percentile correlated +0.22 with the game's own score; taking the
+       negative rate from game_scores (computed over all 114M reviews) and only the
+       topic composition from the sample turns that to -0.44.
 
     Returns {dim: [101 ascending percentile boundaries]}; {} if the query fails, in
-    which case the caller falls back to raw share.
+    which case the caller falls back to DEFAULT_BASELINE.
     """
     struct_params = [
         bigquery.StructQueryParameter(
@@ -1391,7 +1401,7 @@ def radar_baseline() -> dict:
         maximum_bytes_billed=8 * 1024 ** 3)
     sql = f"""
         WITH v AS (SELECT appid, embedding, voted_up FROM {T('review_vectors')}),
-        tot AS (SELECT appid, COUNT(*) AS n FROM v GROUP BY appid),
+        neg AS (SELECT appid, COUNTIF(NOT voted_up) AS n_neg FROM v GROUP BY appid),
         d AS (
           SELECT q.dim AS dim, v.appid AS appid,
                  COUNTIF(ML.DISTANCE(v.embedding, q.qv, 'COSINE') < {STRONG_DIST}) AS strong
@@ -1399,8 +1409,15 @@ def radar_baseline() -> dict:
           WHERE v.voted_up = FALSE
           GROUP BY dim, appid
         )
-        SELECT d.dim, APPROX_QUANTILES(SAFE_DIVIDE(d.strong, t.n) * 100, 100) AS qs
-        FROM d JOIN tot t USING (appid) GROUP BY d.dim"""
+        SELECT d.dim,
+               APPROX_QUANTILES(
+                 (1 - s.raw_pos_rate / 100) * SAFE_DIVIDE(d.strong, n.n_neg) * 100,
+                 100) AS qs
+        FROM d
+        JOIN neg n USING (appid)
+        JOIN {T('game_scores')} s USING (appid)
+        WHERE s.raw_pos_rate IS NOT NULL AND n.n_neg > 0
+        GROUP BY d.dim"""
     try:
         df = _client().query(sql, job_config=cfg).to_dataframe()
     except Exception:
@@ -1408,15 +1425,29 @@ def radar_baseline() -> dict:
     return {r.dim: [float(x) for x in r.qs] for r in df.itertuples()}
 
 
+# Fallback used only when radar_baseline()'s query fails. These are the real measured
+# deciles (p0, p10 ... p100) over all 349 indexed games, not straight lines: the true
+# distributions are steeply skewed — Gameplay's median is 2.4% while Usability's is 0.0%
+# — so a linear ramp put every game in roughly the same percentile band, which is the
+# failure mode this whole baseline exists to avoid. Regenerate from radar_baseline() if
+# the dimension set or STRONG_DIST changes.
 DEFAULT_BASELINE = {
-    "Performance & Optimization": [i * 0.20 for i in range(101)],
-    "Gameplay & Controls": [i * 0.15 for i in range(101)],
-    "Story & Content Volume": [i * 0.12 for i in range(101)],
-    "Visuals & Art Direction": [i * 0.08 for i in range(101)],
-    "Audio & Sound Quality": [i * 0.06 for i in range(101)],
-    "Price & Value for Money": [i * 0.18 for i in range(101)],
-    "Dev Support & Updates": [i * 0.22 for i in range(101)],
-    "Usability & Onboarding": [i * 0.10 for i in range(101)],
+    "Performance & Optimization":
+        [0.0, 0.029, 0.066, 0.116, 0.204, 0.291, 0.478, 0.690, 1.261, 2.419, 8.068],
+    "Gameplay & Controls":
+        [0.044, 0.679, 1.087, 1.537, 1.956, 2.438, 3.167, 4.327, 5.897, 7.532, 19.466],
+    "Story & Content Volume":
+        [0.0, 0.0, 0.0, 0.0, 0.019, 0.039, 0.060, 0.097, 0.180, 0.308, 1.851],
+    "Visuals & Art Direction":
+        [0.0, 0.041, 0.072, 0.118, 0.173, 0.227, 0.324, 0.453, 0.674, 1.270, 4.339],
+    "Audio & Sound Quality":
+        [0.0, 0.071, 0.156, 0.242, 0.322, 0.460, 0.632, 0.825, 1.240, 1.991, 4.890],
+    "Price & Value for Money":
+        [0.078, 0.530, 0.746, 1.020, 1.426, 2.086, 2.694, 3.488, 4.866, 7.207, 19.255],
+    "Dev Support & Updates":
+        [0.0, 0.0, 0.0, 0.0, 0.014, 0.031, 0.050, 0.086, 0.128, 0.222, 2.515],
+    "Usability & Onboarding":
+        [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.004, 0.024, 0.050, 0.594],
 }
 
 
@@ -1494,7 +1525,13 @@ def friction_radar(appid: int) -> tuple[dict, list]:
         SELECT dim,
                COUNTIF(dist < {STRONG_DIST}) AS strong,
                ARRAY_AGG(text ORDER BY dist LIMIT 3) AS texts,
-               (SELECT COUNT(*) FROM {T('review_vectors')} WHERE appid = @a) AS total_vec
+               -- Per polarity, never the combined count: review_vectors is a balanced
+               -- sample (embed_index caps each polarity separately), so the totals ratio
+               -- describes the sampler rather than the game. See radar_baseline.
+               (SELECT COUNTIF(NOT voted_up) FROM {T('review_vectors')}
+                 WHERE appid = @a) AS n_neg,
+               (SELECT COUNTIF(voted_up) FROM {T('review_vectors')}
+                 WHERE appid = @a) AS n_pos
         FROM scored GROUP BY dim"""
     try:
         df = _client().query(sql, job_config=cfg).to_dataframe()
@@ -1506,7 +1543,7 @@ def friction_radar(appid: int) -> tuple[dict, list]:
     # Fetch real behavioral telemetry data
     try:
         telemetry = q(f"""
-            SELECT s.refund_zone_pct, s.pos_median_hours, c.purchase_pct,
+            SELECT s.refund_zone_pct, s.pos_median_hours, s.raw_pos_rate, c.purchase_pct,
                    (SELECT COUNT(*) FROM {T('alerts')} WHERE appid = @a) AS alert_count
             FROM {T('game_scores')} s
             LEFT JOIN {T('game_composition')} c ON s.appid = c.appid
@@ -1525,7 +1562,17 @@ def friction_radar(appid: int) -> tuple[dict, list]:
     days_since_last = dev_news.get("days_since_last")
     recent_patches = dev_news.get("recent_180d_patches", 0)
 
-    total = int(df.iloc[0].total_vec)
+    n_neg = int(df.iloc[0].n_neg)
+    n_pos = int(df.iloc[0].n_pos)
+    # Severity comes from the game's real all-time positive rate over every review, not
+    # from the balanced vector sample. Composition (which theme) comes from the sample,
+    # which is what it can legitimately estimate. Every indexed game has raw_pos_rate,
+    # so the fallback below is defensive only.
+    raw_pos = (float(telemetry.iloc[0].raw_pos_rate)
+               if not telemetry.empty and pd.notna(telemetry.iloc[0].raw_pos_rate)
+               else None)
+    neg_rate = 1.0 if raw_pos is None else max(0.0, 1.0 - raw_pos / 100.0)
+
     base = radar_baseline()
     counts = {r.dim: {"strong": int(r.strong), "texts": [str(t) for t in r.texts]} for r in df.itertuples()}
 
@@ -1534,8 +1581,13 @@ def friction_radar(appid: int) -> tuple[dict, list]:
         neg_item = counts.get(d, {"strong": 0, "texts": []})
         pos_item = counts.get(f"{d}__praise", {"strong": 0, "texts": []})
 
-        neg_share = 100.0 * neg_item["strong"] / total if total else 0.0
-        pos_share = 100.0 * pos_item["strong"] / total if total else 0.0
+        # P(review is negative) x P(theme | negative) -> "% of ALL this game's reviews
+        # that are a negative review about this theme", which is what the UI claims.
+        neg_share = (neg_rate * 100.0 * neg_item["strong"] / n_neg) if n_neg else 0.0
+        # Praise stays a pure within-positives composition: it is only used as a
+        # discount heuristic below, and scaling it by the positive rate too would
+        # re-tune thresholds that were set against the unscaled value.
+        pos_share = (100.0 * pos_item["strong"] / n_pos) if n_pos else 0.0
 
         # Calculate raw friction percentile from baseline quantiles
         fric_pctl = radar_percentile(neg_share, base.get(d, []), d)
