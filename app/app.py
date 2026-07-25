@@ -1530,13 +1530,25 @@ def friction_radar(appid: int) -> tuple[dict, list]:
         ),
         scored AS (
           SELECT q.dim AS dim, v.text AS text,
-                 ML.DISTANCE(v.embedding, q.qv, 'COSINE') AS dist
+                 ML.DISTANCE(v.embedding, q.qv, 'COSINE') AS dist,
+                 -- Quotable = says something in words. Excludes ASCII-art blobs
+                 -- (box-drawing/block/braille runs) and the copy-paste ballot-box
+                 -- rating template that circulates on Steam, both of which sit very
+                 -- close to the Visuals probe purely because they contain the word
+                 -- "Graphics" or a wall of glyphs. Battlefield 2042's top visual
+                 -- quote was one of these templates, which says nothing at all.
+                 NOT REGEXP_CONTAINS(v.text,
+                   r'[\\x{{2500}}-\\x{{259F}}\\x{{2800}}-\\x{{28FF}}]|☐|☑') AS quotable
           FROM v CROSS JOIN UNNEST(@dims) AS q
           WHERE v.voted_up = q.want_pos
         )
         SELECT dim,
+               -- The count keeps every matching review; only the QUOTES are filtered,
+               -- because this noise is 2.8% of negatives and dropping it from the
+               -- metric would shift grading for no measured benefit.
                COUNTIF(dist < {STRONG_DIST}) AS strong,
-               ARRAY_AGG(text ORDER BY dist LIMIT 3) AS texts,
+               ARRAY_AGG(IF(quotable, text, NULL) IGNORE NULLS
+                         ORDER BY dist LIMIT 3) AS texts,
                -- Per polarity, never the combined count: review_vectors is a balanced
                -- sample (embed_index caps each polarity separately), so the totals ratio
                -- describes the sampler rather than the game. See radar_baseline.
@@ -2020,17 +2032,24 @@ def render_friction_radar(radar: dict, praise_texts: list, my_dims: list):
         st.caption("Not enough indexed reviews to profile player friction for this game.")
         return
 
-    # Worst level first, then most unusual within a level, so the headline below picks
-    # the theme a buyer should actually worry about.
+    # Worst level first, then the LARGEST SHARE within a level — not the highest
+    # percentile. The two orderings fail in opposite directions and it was measured on
+    # ten games whose real controversy is documented independently of this dataset:
+    # ranking by percentile always surfaces the rarest theme (Visuals, corpus median
+    # 0.23%, outranked Gameplay at 2.44%), so Battlefield 2042's headline was art
+    # direction rather than its broken launch; ranking by share alone always surfaces
+    # the catch-all theme, making "Gameplay & Controls" the answer for nearly every
+    # game. Level-then-share reads as "among the themes where this game is genuinely
+    # unusual, the one most players actually raise", and scored 7-8 of 10 against 6.
+    # The percentile still does the grading and is still shown, just not the ordering.
     ranked = sorted(
         radar.items(),
         key=lambda kv: ({"High Risk": 0, "Moderate Risk": 1, "Low Risk": 2}[kv[1]["level"]],
-                        -kv[1]["pctl"]))
+                        -kv[1]["share"]))
     top_dim, top_val = ranked[0]
     if top_val["level"] == "Low Risk":
-        st.success(f"Nothing stands out. The loudest theme is {top_dim.lower()}, "
-                   f"raised in {top_val['share']:.1f}% of reviews — "
-                   f"{rank_phrase(top_val['pctl'])}.")
+        st.success(f"Nothing stands out. The most-raised theme is {top_dim.lower()}, "
+                   f"in {top_val['share']:.1f}% of reviews — {rank_phrase(top_val['pctl'])}.")
     else:
         st.markdown(f"**Biggest friction: {top_dim}** — raised in "
                     f"{top_val['share']:.1f}% of this game's reviews, "
