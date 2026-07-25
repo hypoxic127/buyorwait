@@ -1143,14 +1143,14 @@ def person_game_fit(my_rhythm, my_goal, my_device, my_hours, my_dims):
                 with c_plot:
                     fig = radar_figure(radar, my_dims)
                     if fig is not None:
-                        # Keep the mode bar (it appears on hover) so the radar can be
-                        # zoomed and reset; displayModeBar:False left it with no zoom
-                        # affordance at all.
+                        # No mode bar: under Streamlit 1.58 the plotly modebar container
+                        # renders empty even with displayModeBar forced True, and plotly
+                        # elements get no Streamlit fullscreen button either — verified in
+                        # the browser, so don't retry this. The radar is seven labelled
+                        # points against fixed threshold rings, so it reads at one size;
+                        # the dense time series is where zooming actually matters.
                         st.plotly_chart(fig, use_container_width=True,
-                                        config={"displaylogo": False,
-                                                "displayModeBar": True,
-                                                "modeBarButtonsToRemove": [
-                                                    "select2d", "lasso2d", "toggleSpikelines"]})
+                                        config={"displayModeBar": False})
                 with c_list:
                     chips = "".join(risk_chip(d, v["level"], d in my_dims) for d, v in ranked)
                     st.markdown(f'<div style="margin:6px 0 4px;">{chips}</div>',
