@@ -152,7 +152,11 @@ button[data-testid^="stBaseButton-primary"]:hover {
 [data-testid="stMarkdown"]:has(.panel-mark) { display: none !important; }
 
 /* ---- Personal-fit adjustment chips -------------------------------------- */
-.fit-factors { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 12px; }
+.fit-lead {
+    font-size: 0.72rem; font-weight: 600; letter-spacing: 0.06em;
+    text-transform: uppercase; color: #64748b; margin: 10px 0 6px;
+}
+.fit-factors { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 2px; }
 .fit-factor {
     font-size: 0.75rem; padding: 4px 10px; border-radius: 7px;
     background: rgba(255, 255, 255, 0.035);
@@ -219,6 +223,14 @@ button[data-testid^="stBaseButton-primary"]:hover {
 }
 .sync-dot { width: 6px; height: 6px; border-radius: 50%; background: #38bdf8; }
 .sync-text { font-size: 12px; color: #94a3b8; }
+
+/* Sits under the fit gauge; the negative margin pulls it up into the arc's
+   empty lower half instead of leaving a gap. */
+.gauge-cap {
+    text-align: center; margin-top: -30px; color: #7c8ba1;
+    font-size: 0.68rem; letter-spacing: 0.09em;
+    text-transform: uppercase; font-weight: 600;
+}
 
 /* ---- Featured-game cards ------------------------------------------------
    The title must occupy exactly one line or the cards' Analyse buttons sit at
@@ -374,22 +386,27 @@ def personal_fit(score, radar, med_hours, refund_pct, rhythm, goal, device, hour
 
 
 def fit_factors_html(factors: list) -> str:
-    """Show the adjustments behind the fit number so it can be audited, not just trusted."""
+    """Show the adjustments behind the fit number so it can be audited, not just trusted.
+
+    Each chip spells out "-14 pts": a bare "-14" next to a percentage and a score read
+    as a third mystery number rather than as points moved off the game's rating.
+    """
     if not factors:
         return ""
     out = []
     for label, d, why in factors:
         if d is None:
-            col, val = "#f87171", "cap"
+            col, val = "#f87171", "capped"
         elif d > 0:
-            col, val = "#4ade80", f"+{d}"
+            col, val = "#4ade80", f"+{d} pts"
         elif d <= -10:
-            col, val = "#f87171", str(d)
+            col, val = "#f87171", f"{d} pts"
         else:
-            col, val = "#facc15", str(d)
+            col, val = "#facc15", f"{d} pts"
         out.append(f'<span class="fit-factor">{label} '
                    f'<b style="color:{col}">{val}</b> · {why}</span>')
-    return f'<div class="fit-factors">{"".join(out)}</div>'
+    return ('<div class="fit-lead">Your profile moved the game\'s rating by:</div>'
+            f'<div class="fit-factors">{"".join(out)}</div>')
 
 
 def verdict_badge(title: str, desc: str, color: str) -> str:
@@ -646,7 +663,9 @@ def score_gauge(score: float, color: str):
             steps=[dict(range=[0, 40], color="rgba(248,113,113,0.10)"),
                    dict(range=[40, 70], color="rgba(250,204,21,0.10)"),
                    dict(range=[70, 100], color="rgba(74,222,128,0.10)")])))
-    fig.update_layout(height=165, margin=dict(l=12, r=12, t=8, b=0),
+    # Plotly scales the dial to the available width, so height has to leave room for
+    # it: at 165 the arc's lower ends were sheared off by the bottom of the figure.
+    fig.update_layout(height=200, margin=dict(l=10, r=10, t=10, b=6),
                       paper_bgcolor="rgba(0,0,0,0)", font=dict(family="Plus Jakarta Sans"))
     return fig
 # Prevalence thresholds — calibrated against high- vs low-friction reference games.
@@ -857,25 +876,6 @@ def bombing_window(appid: int, center: str, days: int = 120) -> pd.DataFrame:
             ORDER BY day""", a=int(appid), c=str(center))
     except Exception:
         return pd.DataFrame()
-
-
-def spark_window(daily: pd.DataFrame, points: int = 52) -> pd.DataFrame:
-    """The longest unbroken stretch of periods that actually have reviews.
-
-    Source for the metric sparklines. A plain .tail() is wrong here: the dataset has a
-    multi-year hole between the 2023 snapshot and the nightly sync, so the last 52
-    buckets are nearly all empty and the sparkline renders as a flat line with a single
-    spike at the right edge — verified in the browser before this was added.
-    """
-    if daily.empty:
-        return daily
-    live = daily[daily["n"] > 0]
-    if live.empty:
-        return live
-    step = daily["day"].diff().median()
-    # A run breaks wherever two consecutive non-empty periods sit more than 3 apart.
-    run_id = (live["day"].diff() > step * 3).cumsum()
-    return live[run_id == run_id.value_counts().idxmax()].tail(points)
 
 
 def _log_usage(event: str, game: str, appid: int):
@@ -1157,48 +1157,49 @@ def person_game_fit(my_rhythm, my_goal, my_device, my_hours, my_dims):
             my_rhythm, my_goal, my_device, my_hours, my_dims)
 
         with panel():
-            c_img, c_m, c_g = st.columns([1.1, 2.2, 1.1], vertical_alignment="center")
-            c_img.image(f"https://cdn.cloudflare.steamstatic.com/steam/apps/{appid}/header.jpg",
+            # The gauge and the words that explain it are one statement, so they sit
+            # side by side. Previously the fit number — the answer this whole page
+            # exists to give — was the smallest thing on the card and pinned to the
+            # far right, while the verdict text sat metres away on the left.
+            c_art, c_gauge, c_verdict = st.columns([1, 1.15, 2.5],
+                                                   vertical_alignment="center")
+            c_art.image(f"https://cdn.cloudflare.steamstatic.com/steam/apps/{appid}/header.jpg",
                         width="stretch",
                         link=f"https://store.steampowered.com/app/{appid}")
-            with c_m:
-                st.markdown(verdict_badge(fit_title, fit_desc, fit_color), unsafe_allow_html=True)
-                st.markdown(fit_factors_html(fit_factors), unsafe_allow_html=True)
-                m1, m2, m3 = st.columns(3)
-                # Game quality and personal fit are separate answers — showing both is
-                # what lets "great game, wrong game for you" actually be visible.
-                # Sparklines come from daily_series, the same frame the Time & Trend chart
-                # draws, so the thumbnail trend and the full chart cannot disagree. Too
-                # few points is left plain rather than drawn as a misleading stub.
-                spark = spark_window(daily)
-                sp = spark if len(spark) >= 8 else None
-                # height="stretch": only two of the three carry a sparkline and one
-                # carries a delta line, so left to "content" the cards end at three
-                # different depths.
-                m1.metric("Game Rating", f"{row.score_live:.0f}/100", border=True,
-                          height="stretch")
-                m2.metric("Recent 90-Day",
-                          "—" if pd.isna(row.recent_pos_rate_live) else f"{row.recent_pos_rate_live:.0f}%",
-                          delta=None if (pd.isna(row.recent_pos_rate_live) or pd.isna(row.raw_pos_rate))
-                          else f"{row.recent_pos_rate_live - row.raw_pos_rate:+.0f}% vs overall",
-                          border=True, height="stretch",
-                          chart_data=None if sp is None else sp["pos_pct"],
-                          chart_type="line")
-                m3.metric("Reviews", f"{int(row.n_reviews_total):,}", border=True,
-                          height="stretch",
-                          chart_data=None if sp is None else sp["n"],
-                          chart_type="bar")
-                if sp is not None:
-                    st.caption(f"Sparklines: {len(sp)} {smoothing.split()[0]} periods of "
-                               f"review history to {sp['day'].max():%b %Y}.")
-            with c_g:
+            with c_gauge:
                 st.plotly_chart(score_gauge(fit_score, fit_color),
                                 width="stretch",
                                 config={"displayModeBar": False})
-                st.markdown('<div style="text-align:center;margin-top:-14px;color:#7c8ba1;'
-                            'font-size:0.7rem;letter-spacing:0.09em;text-transform:uppercase;'
-                            'font-weight:600;">Your personal fit</div>',
+                st.markdown('<div class="gauge-cap">Your personal fit&nbsp;· 0–100</div>',
                             unsafe_allow_html=True)
+            with c_verdict:
+                st.markdown(verdict_badge(fit_title, fit_desc, fit_color), unsafe_allow_html=True)
+                st.markdown(fit_factors_html(fit_factors), unsafe_allow_html=True)
+
+            # Evidence strip. Three tiles of identical shape — no sparklines: only two
+            # of the three had a series, and forcing equal height to compensate left
+            # ~80px of dead air inside every box. The history it hinted at is one click
+            # away in Time & Trend, zoomable and with the complaint keywords attached.
+            s1, s2, s3 = st.columns(3)
+            # Game quality and personal fit are separate answers — showing both is what
+            # lets "great game, wrong game for you" actually be visible. They are also
+            # easy to confuse (both land near 74 for PUBG), hence the help text.
+            s1.metric("Game rating", f"{row.score_live:.0f}/100", border=True,
+                      height="stretch",
+                      help="How good the game is for players **in general** — reviews "
+                           "weighted by playtime and decayed with age. This is about the "
+                           "game, not about you; the gauge above is your personal fit.")
+            s2.metric("Recent 90 days",
+                      "—" if pd.isna(row.recent_pos_rate_live) else f"{row.recent_pos_rate_live:.0f}%",
+                      delta=None if (pd.isna(row.recent_pos_rate_live) or pd.isna(row.raw_pos_rate))
+                      else f"{row.recent_pos_rate_live - row.raw_pos_rate:+.0f} pts vs all-time",
+                      border=True, height="stretch",
+                      help="Share of the last 90 days of reviews that are positive, "
+                           "against the game's all-time rate. Anchored to the data's "
+                           "most recent day, not today's date.")
+            s3.metric("Reviews analysed", f"{int(row.n_reviews_total):,}", border=True,
+                      height="stretch",
+                      help="How much evidence everything above rests on.")
             if (not pd.isna(row.recent_pos_rate_live)
                     and row.score_live - row.recent_pos_rate_live > 15):
                 st.warning("Recent 90-day sentiment is running more than 15 points below the "
