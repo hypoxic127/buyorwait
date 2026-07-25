@@ -1412,14 +1412,25 @@ def radar_baseline() -> dict:
         query_parameters=[bigquery.ArrayQueryParameter("dims", "STRUCT", struct_params)],
         maximum_bytes_billed=8 * 1024 ** 3)
     sql = f"""
-        WITH v AS (SELECT appid, embedding, voted_up FROM {T('review_vectors')}),
+        WITH v AS (SELECT appid, text, embedding, voted_up FROM {T('review_vectors')}),
         neg AS (SELECT appid, COUNTIF(NOT voted_up) AS n_neg FROM v GROUP BY appid),
-        d AS (
-          SELECT q.dim AS dim, v.appid AS appid,
-                 COUNTIF(ML.DISTANCE(v.embedding, q.qv, 'COSINE') < {STRONG_DIST}) AS strong
+        -- Each complaint is assigned to its NEAREST theme only. Counting a review for
+        -- every theme within STRONG_DIST inflated whichever themes sit closest to the
+        -- others: measured over the corpus, 81% of "Visuals" matches and 85% of "Audio"
+        -- matches were nearer to a different theme, which is why those two kept winning
+        -- headlines they had no business winning. Nearest-only makes the shares a
+        -- partition of the complaints. friction_radar must assign identically or the
+        -- per-game numbers are not comparable with these percentiles.
+        scored AS (
+          SELECT v.appid AS appid, q.dim AS dim,
+                 ML.DISTANCE(v.embedding, q.qv, 'COSINE') AS dist
           FROM v CROSS JOIN UNNEST(@dims) AS q
           WHERE v.voted_up = FALSE
-          GROUP BY dim, appid
+          QUALIFY ROW_NUMBER() OVER (PARTITION BY v.appid, v.text ORDER BY dist) = 1
+        ),
+        d AS (
+          SELECT dim, appid, COUNTIF(dist < {STRONG_DIST}) AS strong
+          FROM scored GROUP BY dim, appid
         )
         SELECT d.dim,
                APPROX_QUANTILES(
@@ -1473,7 +1484,11 @@ def radar_percentile(share_pct: float, quantiles: list, dim: str = "") -> float:
         quantiles = DEFAULT_BASELINE.get(dim, [i * 0.15 for i in range(101)])
     lo = bisect.bisect_left(quantiles, share_pct)
     hi = bisect.bisect_right(quantiles, share_pct)
-    return (lo + hi) / 2 / (len(quantiles) - 1) * 100
+    pctl = (lo + hi) / 2 / (len(quantiles) - 1) * 100
+    # Clamp: a share above every quantile puts both bisects past the last index, which
+    # returned up to 101 — outside the radial axis and outside the range the callers
+    # assume. BioShock Remastered hit 100.5 on Audio.
+    return min(100.0, max(0.0, pctl))
 
 
 def radar_level(share_pct: float, pctl: float) -> str:
@@ -1541,6 +1556,13 @@ def friction_radar(appid: int) -> tuple[dict, list]:
                    r'[\\x{{2500}}-\\x{{259F}}\\x{{2800}}-\\x{{28FF}}]|☐|☑') AS quotable
           FROM v CROSS JOIN UNNEST(@dims) AS q
           WHERE v.voted_up = q.want_pos
+          -- Complaints go to their nearest theme only, matching radar_baseline. Praise
+          -- probes are left untouched: they all share want_pos=TRUE, so ranking them
+          -- against each other would make the per-theme praise compete with the generic
+          -- PRAISE_Q used for the "what fans praise" quotes.
+          QUALIFY q.want_pos
+               OR ROW_NUMBER() OVER (PARTITION BY v.text, q.want_pos ORDER BY
+                    ML.DISTANCE(v.embedding, q.qv, 'COSINE')) = 1
         )
         SELECT dim,
                -- The count keeps every matching review; only the QUOTES are filtered,
