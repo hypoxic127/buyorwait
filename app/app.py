@@ -2591,6 +2591,16 @@ Tables:
 Rules:
 - Output exactly ONE BigQuery Standard SQL SELECT (or WITH ... SELECT) statement — no markdown, no comments, no explanation.
 - Read-only. Never generate INSERT/UPDATE/DELETE/DDL.
+- CRITICAL — refuse what the data cannot answer. These tables contain ONLY review
+  metrics. There is NO price, NO genre or tag, NO platform (Windows/Mac/Switch/console),
+  NO developer or publisher or director, NO release date, NO player or ownership counts,
+  NO achievements, NO hardware specs. If answering would need any of those, output
+  exactly this and nothing else:
+      SELECT 'UNSUPPORTED' AS unsupported
+  Do NOT substitute a near-miss: asked for Elden Ring's PRICE, do not return its score;
+  asked which games a DIRECTOR made, do not pattern-match their name against game
+  titles. Answering a different question than the one asked is worse than refusing.
+  Same for questions that are not about this data at all.
 - Match game names case-insensitively: LOWER(game) LIKE '%...%'.
 - End with LIMIT 100 unless the question implies a different limit.
 - Results are shown straight to Steam players, so alias EVERY output column with a
@@ -2609,6 +2619,10 @@ Rules:
   all-time and 90-day fields on {T('v_scores_live')} over hand-rolled CURRENT_DATE()
   windows unless the user explicitly asks about recent activity.
 """
+
+# Sentinel the model returns instead of answering a question the schema cannot support.
+# Kept as a constant so the prompt and the check can never drift apart.
+UNSUPPORTED_SQL = "'UNSUPPORTED'"
 
 _WRITE_KEYWORDS = re.compile(
     r"\b(insert|update|delete|merge|drop|create|alter|truncate|grant|revoke|call|export)\b", re.I)
@@ -2974,6 +2988,23 @@ def page_ask():
 
             if sql_error:
                 st.warning(sql_error)
+                return
+
+            # The model is told to emit this rather than answer an adjacent question it
+            # cannot actually answer. Tested: asked for Elden Ring's price it used to
+            # return Elden Ring's confidence score, and asked which games a director made
+            # it pattern-matched the name against game titles. A wrong answer that looks
+            # right is worse than an honest refusal, so intercept before running.
+            if UNSUPPORTED_SQL in sql.upper():
+                st.info(
+                    "That needs data this project doesn't hold. It stores **review "
+                    "metrics only** — scores, positive rates, review counts, daily "
+                    "history, review-bombing events and how reviewers acquired the game. "
+                    "There's no price, genre, platform, developer, release date or "
+                    "player-count data, so answering would mean guessing.")
+                st.caption("Try: \"top rated games with over 100k reviews\", \"which "
+                           "games were review-bombed most\", or \"games with the highest "
+                           "share of free-key reviews\".")
                 return
 
             loading_ph = st.empty()
