@@ -1269,8 +1269,21 @@ _DIM_SHORT = {
 
 # The fill tint follows the worst theme, so the shape's colour answers "is anything
 # actually wrong here" before you read a single label.
-_FILL = {"High Risk": "rgba(248,113,113,0.20)", "Moderate Risk": "rgba(250,204,21,0.16)",
-         "Low Risk": "rgba(74,222,128,0.13)"}
+_FILL = {"High Risk": "rgba(248,113,113,0.22)", "Moderate Risk": "rgba(250,204,21,0.18)",
+         "Low Risk": "rgba(74,222,128,0.15)"}
+
+# Radius reserved at the centre. A clean game sits near the 0th percentile on every
+# axis, and mapping that straight onto the polar radius collapses the polygon into a
+# dot — unreadable, and it hides which axis is the least clean. The offset is applied
+# identically to the data AND to all three reference rings, so every relationship on
+# the chart is preserved: it rescales the canvas, it does not flatter the numbers.
+# Hover still reports the true percentile and share.
+R_INNER = 16.0
+
+
+def _r(pctl: float) -> float:
+    """Percentile -> plotted radius."""
+    return R_INNER + (100.0 - R_INNER) * max(0.0, min(100.0, float(pctl))) / 100.0
 
 
 def radar_figure(radar: dict, my_dims: list):
@@ -1297,7 +1310,7 @@ def radar_figure(radar: dict, my_dims: list):
                 key=lambda lv: {"High Risk": 0, "Moderate Risk": 1, "Low Risk": 2}[lv])
 
     fig = go.Figure()
-    ring = lambda r: [r] * (len(dims) + 1)          # noqa: E731 - local shorthand
+    ring = lambda r: [_r(r)] * (len(dims) + 1)      # noqa: E731 - local shorthand
     # The two grading thresholds, so the shape can be read against the levels the chips
     # report rather than by area alone.
     for lvl, col, nm in ((MODERATE_PCTL, "#facc15", "Moderate at 70%"),
@@ -1309,8 +1322,9 @@ def radar_figure(radar: dict, my_dims: list):
         r=ring(50), theta=theta + theta[:1], mode="lines", name="typical game",
         line=dict(color="rgba(255,255,255,0.45)", width=1.5, dash="solid"), hoverinfo="skip"))
     ring_colors = [_RISK_COLOR[radar[d]["level"]] for d in dims]
+    plotted = [_r(v) for v in vals]
     fig.add_trace(go.Scatterpolar(
-        r=vals + vals[:1], theta=theta + theta[:1], mode="lines+markers", fill="toself",
+        r=plotted + plotted[:1], theta=theta + theta[:1], mode="lines+markers", fill="toself",
         name="this game",
         fillcolor=_FILL[worst], line=dict(color=_RISK_COLOR[worst], width=3),
         marker=dict(size=10, color=ring_colors + ring_colors[:1],
