@@ -1,15 +1,10 @@
-# BuyOrWait — Complete Walkthrough
+# BuyOrWait — Complete System Walkthrough
 
-Two audiences, one document:
-
-* **Part A — System walkthrough**: what runs where, in the order it runs. Read this to understand or rebuild the project.
-* **Part B — Live demo script**: the exact click path, what to say, what to do if something is slow. Read this ten minutes before presenting.
+What runs where, in the order it runs. Read this to understand or rebuild the project.
 
 Live app: https://buyorwait-1047454501331.asia-southeast1.run.app
 
 ---
-
-# Part A — System walkthrough
 
 ## A0. The idea in one paragraph
 
@@ -20,7 +15,7 @@ Steam's rating answers "is this game good?". It cannot answer "is this game good
 | Source | What it gives | How |
 |---|---|---|
 | Kaggle `kieranpoc/steam-reviews` | 114,381,811 reviews through 2023-10-30 (17 GB CSV) | one-off download, `aria2c -x16` |
-| Steam Web API `appreviews` | reviews since the snapshot, ~1.9k tracked games | `fetch_recent.py`, nightly |
+| Steam Web API `appreviews` | reviews since the snapshot, ~2k tracked games | `fetch_recent.py`, nightly |
 | Steam Web API `appreviews` (live) | today's rating for any appid, incl. post-snapshot releases | called from the app at view time |
 
 `convert_to_parquet.py` drops the review text and keeps only the metric columns → 17 GB becomes ~3.4 GB of Parquet in Cloud Storage, which is what makes a 24 GB GPU enough for a 114 M-row job.
@@ -67,18 +62,18 @@ Consequences: history is never rewritten, new days are pure appends, and the sco
 
 ```
 Cloud Scheduler 03:00 ─▶ Cloud Run Job (fetch_recent.py) ─▶ daily_delta
-                                                              │
+                                                               │
 BigQuery scheduled query 03:30 ─▶ alerts_recent ──────────────┤
-                                                              ▼
+                                                               ▼
                           v_daily_all / v_scores_live / v_alerts_all
-                                                              │
-                                     Cloud Run (Streamlit) ◀──┴──▶ Looker Studio
-                                     scale-to-zero, 2 GiB
+                                                               │
+                                      Cloud Run (Streamlit) ◀──┴──▶ Looker Studio
+                                      scale-to-zero, 2 GiB
 ```
 
 Three caching layers, by design: `st.cache_data` (10 min) in front of BigQuery's own result cache, in front of the real one — **pre-aggregation**. The app never touches 114 M rows; it reads a few thousand aggregate rows, or one game's vectors. That is why a scale-to-zero container answers in under two seconds.
 
-Security: no service-account JSON anywhere. The VM runs with `--scopes=cloud-platform`, Cloud Run and the Job use the runtime service account, Gemini goes through Vertex AI with no API key. Generated SQL is regex-guarded to `SELECT`/`WITH` only and capped at 1 GB scanned; Gemini calls are rate-limited server-side per client.
+Security: no service-account JSON anywhere. The VM runs with `--scopes=cloud-platform`, Cloud Run and the Job use the runtime service account, Gemini goes through Agent Development Platform with no API key. Generated SQL is regex-guarded to `SELECT`/`WITH` only and capped at 1 GB scanned; Gemini calls are rate-limited server-side per client.
 
 ## A6. The app, page by page (`app/app.py`, `st.navigation`)
 
@@ -92,10 +87,10 @@ Security: no service-account JSON anywhere. The VM runs with `--scopes=cloud-pla
 * Sub-tabs: **AI Fit Analysis** (Gemini, grounded in this game's retrieved reviews) · **Friction Radar** · **Time & Trend** · **Live Check** (Steam right now).
 
 **2. Friction Radar** (inside Fit)
-Eight dimensions — Performance, Gameplay, Story & Content, Visuals, Audio, Price & Value, Dev Support, Usability — scored by semantic search over the game's negative reviews, then graded **against each dimension's own distribution across every indexed game**. This is the part reviewers should push on: measured over the corpus, some themes draw complaints in two thirds of all games and others in under 5 %, so one flat threshold grades every game identically. High Risk = ≥ 90th percentile **and** ≥ 1 % of that game's reviews; the floor stops a rare theme flagging on noise.
+Eight dimensions — Performance, Gameplay, Story & Content, Visuals, Audio, Price & Value, Dev Support, Usability — scored by semantic search over the game's negative reviews, then graded **against each dimension's own distribution across every indexed game**. This is the part reviewers should push on: measured over the corpus, some themes draw complaints in two thirds of all games and others in under 5 %, so one flat threshold grades every game identically. High Risk = ≥ 90th percentile **and** ≥ 1 % of reviews; Moderate Risk = ≥ 70th percentile **and** ≥ 0.5 %; the floor stops a rare theme flagging on noise.
 
 **3. Review Bombing**
-Episode-level rows (multi-day alerts collapsed per game), z-score, peak volume, baseline, and **"why bombed (AI)"** — the Gemini cause line. Selecting a row charts the event. Small-sample noise is filtered by a minimum-reviews slider; z is capped for display at 99.9.
+Episode-level rows (multi-day alerts collapsed per game), z-score, peak volume, baseline, and **"why bombed (AI)"** — the Gemini cause line. Selecting a row charts the event. Detection requires at least 7 days of history (`MIN_HIST = 7`). Small-sample noise is filtered by a minimum-reviews slider; z is capped for display at 99.9.
 
 **4. Ask Gemini** — two scopes
 * *All 114 M reviews*: NL → BigQuery SQL over the aggregate tables. Generated SQL is shown, guarded, and cost-capped; results auto-chart.
@@ -121,74 +116,3 @@ Idle cost is effectively zero: Cloud Run scales to zero, BigQuery is serverless 
 ## A9. Rebuild from scratch
 
 `README.md` → *Reproduction* has the commands in order (0-8). One correction to the order: run `docs/evergreen.sql` **before** `docs/alerts_live.sql` (the latter reads `v_daily_all`), and run both **before** deploying the app — the app degrades gracefully on a missing table, but there is no reason to show a judge a degraded page.
-
----
-
-# Part B — Live demo script
-
-**Target: 6–8 minutes** of driving, with the 3-minute video as the spine. Skip Part A's vocabulary; show, then explain in one line.
-
-## B0. Ten minutes before
-
-1. Open the app in an **incognito** window, browse every page once — this warms Cloud Run and fills the BigQuery/`st.cache_data` caches so nothing spins during the demo.
-2. Confirm the header pill reads **"Live sync · Nh ago"**. If it says snapshot-only, the nightly Job didn't run — say "the nightly sync window is 03:30 SGT" and move on; do not debug live.
-3. Have a second tab on the GitHub repo, a third on Looker Studio.
-4. Sidebar preset ready: **Life rhythm = Busy Professional, Hardware = Steam Deck, Hours = 6, Dealbreakers = Performance + Price & Value**. That profile produces a visibly different verdict from the crowd score, which is the whole point.
-5. Pick your two demo games in advance: one **well-reviewed but demanding** title (fit collides with the profile) and **Overwatch 2 / Cyberpunk 2077** for the bombing story. Verify both render before you present.
-
-## B1. The hook (45 s) — Person & Game Fit
-
-Do: sidebar profile already set → pick the demanding game.
-
-Say: *"Steam says this game is 92 % positive. That's the answer to 'is it good'. My question is 'is it good for me' — six hours a week, on a Deck. The engine keeps those apart: quality on the left, fit on the right, and every adjustment between them is itemised with its reason — time to value, early drop-off, hardware complaints. Nothing here is a black box."*
-
-Point at one factor line and read it out. That single line is the difference between a dashboard and a decision tool.
-
-## B2. Evidence, not vibes (60 s) — Friction Radar → AI Fit Analysis
-
-Do: open **Friction Radar**, hover a High-Risk dimension, then open **AI Fit Analysis**.
-
-Say: *"Eight dimensions, scored by semantic search over this game's negative reviews — not keyword counting. And graded against each dimension's distribution across the whole corpus, because complaints aren't uniformly common: some themes appear in two thirds of all games, others in under five percent. A flat threshold would grade every game identically. High Risk means top decile **and** at least one percent of this game's reviews."*
-
-Then, on the AI panel: *"Gemini writes this from reviews we retrieved for this game — it quotes them, and it declines when the data can't answer."*
-
-## B3. The GPU payoff (60 s) — the number that only exists because of RAPIDS
-
-Do: switch to the repo's benchmark table (or your PPT benchmark slide).
-
-Say: *"Same machine, same script — the only change is the launcher, `python -m cudf.pandas`. Eight vCPUs: thirty-eight seconds. The L4: two point seven. Fourteen times end-to-end, thirty-five on the groupby. That's what makes a nightly full recompute of 114 million reviews affordable — about twenty cents a night — and that's why the header says 'live sync', not 'snapshot'."*
-
-If asked how you got there: the per-stage story from A2 (the timedelta fallback that made the GPU slower until it was removed). Judges reward that answer.
-
-## B4. Why, not just what (60 s) — Review Bombing
-
-Do: Review Bombing → point at a famous row → read the **why bombed (AI)** cell → click the row to chart it.
-
-Say: *"Detection is a z-score on the negative rate plus a volume condition. But detection alone isn't useful to a developer — so for every episode we pull that window's negative reviews, extract what's distinctive versus the game's own 60-day baseline, and have Gemini name the cause. This one: PVE cancelled, monetisation, hero locking. Automatically, from tens of thousands of reviews."*
-
-## B5. Ask it anything (45 s) — the risky-but-worth-it part
-
-Do: *All 114 M reviews* scope, click a **prepared example** question (never improvise here), show the generated SQL expander, then switch to *Single game* and ask a review-grounded question.
-
-Say: *"Two retrieval paths behind one box. Analytical questions become BigQuery SQL — shown, validated read-only, cost-capped. Questions about experience go to vector search over the review text and get answered with citations."*
-
-## B6. Close (30 s)
-
-Say: *"Pipeline on the L4, aggregates in BigQuery, embeddings and vector search in BigQuery too, Gemini on Vertex, orchestrated by Scheduler and Cloud Run Jobs, served scale-to-zero. Idle cost is effectively nothing. The point isn't the stack — it's that a hundred and fourteen million opinions became one decision, for one person, that can defend every number it shows."*
-
-## B7. Answers to the five questions you will get
-
-| Question | Answer |
-|---|---|
-| "Where do the fit weights come from?" | Transparent judgement calls, stated as such in the UI, applied to data-derived quantities (median hours, drop-off share, complaint percentiles). Not fitted — and we show every adjustment so a user can disagree with one. |
-| "Isn't the 2023 snapshot stale?" | The score is anchored to *today* by construction (A3), and the ~1.9k most-reviewed games are topped up nightly from the Steam API. Older reviews decay to near-zero weight at a 90-day half-life. |
-| "How do you know the bombing detector works?" | Dual condition against each game's own rolling baseline, validated against publicly documented incidents; z is a severity, not a label, and the UI lets you raise the threshold and the minimum sample. |
-| "Why RAPIDS instead of just BigQuery / more CPU?" | The weighting and rolling-window work is iterative dataframe logic, not a single SQL shape; RAPIDS runs the exact same pandas code 14× faster on one $1/hr box. Where SQL is the better tool — the nightly alert recompute — we use SQL. |
-| "Why not a managed vector DB?" | 300 k vectors, already sitting in BigQuery, always filtered to one game. `VECTOR_SEARCH` costs no new service and no idle spend. Beyond a few million vectors, that trade flips. |
-
-## B8. If something breaks on stage
-
-* **Page slow / cold** — keep talking over it; the pre-warm in B0 makes this unlikely.
-* **Gemini errors or rate-limits** — say "the AI calls are rate-limited per client on purpose" and pivot to the Friction Radar, which needs no LLM.
-* **A game isn't in the semantic index** — the index is top-300 + every bombed game; switch to a prepared title.
-* **Total failure** — fall back to the 3-minute video and the screenshots in `docs/`. Have both open before you start.

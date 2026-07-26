@@ -26,7 +26,10 @@ CREATE TABLE IF NOT EXISTS `steam_intel.daily_delta` (
 CREATE OR REPLACE VIEW `steam_intel.v_daily_all` AS
 WITH base AS (
   SELECT appid,
-         DATE(TIMESTAMP_SECONDS(DIV(date, 1000000000))) AS day,
+         CASE 
+           WHEN SAFE_CAST(date AS INT64) IS NOT NULL THEN DATE(TIMESTAMP_SECONDS(DIV(CAST(date AS INT64), 1000000000)))
+           ELSE SAFE_CAST(date AS DATE)
+         END AS day,
          n, pos, w_sum, wv_sum
   FROM `steam_intel.game_daily`
 ),
@@ -85,7 +88,10 @@ FROM `steam_intel.daily_delta`;
 -- ============================================================================
 WITH d AS (
   SELECT appid,
-         DATE(TIMESTAMP_SECONDS(DIV(date, 1000000000))) AS day,
+         CASE 
+           WHEN SAFE_CAST(date AS INT64) IS NOT NULL THEN DATE(TIMESTAMP_SECONDS(DIV(CAST(date AS INT64), 1000000000)))
+           ELSE SAFE_CAST(date AS DATE)
+         END AS day,
          w_sum, wv_sum
   FROM `steam_intel.game_daily`
 ),

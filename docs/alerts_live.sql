@@ -28,20 +28,26 @@ w AS (
   FROM d
   WINDOW win30 AS (PARTITION BY appid ORDER BY day
                    ROWS BETWEEN 30 PRECEDING AND 1 PRECEDING)
+),
+scored AS (
+  SELECT appid, day, n, neg_rate, base_m AS base_neg_rate,
+         SAFE_DIVIDE(neg_rate - base_m, GREATEST(COALESCE(base_s, 0.0), 0.0001)) AS z,
+         base_n, hist
+  FROM w
 )
-SELECT appid, day, n, neg_rate,
-       (neg_rate - base_m) / GREATEST(base_s, 1e-4) AS z,
-       base_m AS base_neg_rate
-FROM w
+SELECT appid, day, n, neg_rate, z, base_neg_rate
+FROM scored
 WHERE hist >= 7                                              -- enough history
-  AND (neg_rate - base_m) / GREATEST(base_s, 1e-4) > 3       -- z > 3
+  AND z > 3.0                                               -- z > 3
   AND n > 2 * base_n;                                        -- and unusual volume
 
 -- 2) One object for the app: snapshot alerts + nightly alerts -----------------
---    alerts.date is epoch NANOSECONDS (Parquet load); alerts_recent.day is DATE.
 CREATE OR REPLACE VIEW `steam_intel.v_alerts_all` AS
 SELECT a.appid, s.game,
-       DATE(TIMESTAMP_SECONDS(DIV(a.date, 1000000000))) AS day,
+       CASE 
+         WHEN SAFE_CAST(a.date AS INT64) IS NOT NULL THEN DATE(TIMESTAMP_SECONDS(DIV(CAST(a.date AS INT64), 1000000000)))
+         ELSE SAFE_CAST(a.date AS DATE)
+       END AS day,
        a.n, a.neg_rate, a.z, a.base_neg_rate
 FROM `steam_intel.alerts` a
 LEFT JOIN `steam_intel.game_scores` s USING (appid)
