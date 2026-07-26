@@ -2044,7 +2044,11 @@ def render_ai_analysis(appid: int, game: str, rhythm: str, goal: str, device: st
         return
         
     if not md:
-        st.info("No indexed review evidence found for this game.")
+        st.info("**Not in the semantic index yet.** This reading quotes the game's own "
+                "reviews back at your profile, so it needs the review embeddings that "
+                "currently cover the 349 most-reviewed games. Everything else on this "
+                "page — score, personal fit, time budget, trend history, live Steam "
+                "check — is computed from real data for this game.")
     else:
         st.markdown(md)
         st.caption("Synthesized from this game's real Steam reviews, weighed against your profile.")
@@ -2057,6 +2061,23 @@ def get_game_select_labels() -> list[str]:
     return (names_df["game"] + "  (#" + names_df["appid"].astype(str) + ")").tolist()
 
 
+@st.cache_data(ttl=86400, show_spinner=False)
+def deep_analysis_appids() -> set:
+    """Games with review embeddings — the only ones that can get a Friction Radar or an
+    AI review reading.
+
+    This is 349 of the ~20,000 selectable games. Every other pick still gets its score,
+    personal fit, time budget, trend history and live check, but two of the four detail
+    tabs come up empty. Saying that on the card is the difference between "this product
+    is thin" and "this game isn't in the deep index yet".
+    """
+    try:
+        df = q(f"SELECT DISTINCT appid FROM {T('review_vectors')}")
+        return set(df["appid"].astype(int).tolist())
+    except Exception:
+        return set()
+
+
 def render_friction_radar(radar: dict, praise_texts: list, my_dims: list):
     """The Friction Radar sub-tab. Extracted from person_game_fit, which had grown to
     322 lines of interleaved data access and layout; this block only ever needed the
@@ -2065,7 +2086,11 @@ def render_friction_radar(radar: dict, praise_texts: list, my_dims: list):
             sub="Each theme ranked against every other indexed game — because "
                 "raw complaint rates aren't comparable between themes.")
     if not radar:
-        st.caption("Not enough indexed reviews to profile player friction for this game.")
+        st.info("**Not in the semantic index yet.** The radar reads this game's own "
+                "negative reviews and ranks each theme against all 349 indexed games, "
+                "so it needs review embeddings that this title doesn't have. Its score, "
+                "your personal fit, the time budget and the full trend history are all "
+                "still real — see the other tabs.")
         return
 
     # Worst level first, then the LARGEST SHARE within a level — not the highest
@@ -2305,6 +2330,21 @@ def person_game_fit(my_rhythm, my_goal, my_device, my_hours, my_dims, my_style="
                            "overall score — momentum may be cooling.")
 
         # The detail below used to be one long vertical stack: you had to scroll past
+        # Say up front which of the detail tabs will actually have content. Only 349 of
+        # the ~20,000 selectable games carry review embeddings, so for most picks the
+        # Friction Radar and the AI reading are empty — discovering that by clicking
+        # two tabs reads as a broken product rather than a known coverage boundary.
+        if appid in deep_analysis_appids():
+            st.caption(":green-badge[:material/check_circle: Deep review analysis] "
+                       "This game is in the semantic index — Friction Radar and the AI "
+                       "reading below are backed by its actual review text.")
+        else:
+            st.caption(":gray-badge[:material/info: Core analysis] "
+                       "Score, personal fit, time budget, trend history and the live "
+                       "Steam check are all live below. Friction Radar and the AI "
+                       "reading need review embeddings, which currently cover the 349 "
+                       "most-reviewed games — this one isn't indexed yet.")
+
         # three panels to reach the AI button, and its output then pushed everything
         # further down. Sub-tabs keep the decision card in view and put each block one
         # click away. Sections stay in their original code order — the tab objects are
@@ -2709,7 +2749,64 @@ def rag_answer(appid: int, game_label: str, question: str) -> tuple[str, str]:
     return (ans, numbered)
 
 
-GEMINI_BUDGET = 5
+GEMINI_BUDGET = 5              # per session — a courtesy limit, resets on reload
+GEMINI_PER_CLIENT_HOUR = 12    # per client IP per rolling hour — survives reload
+GEMINI_GLOBAL_DAY = 400        # hard ceiling per server instance per day
+
+
+@st.cache_resource
+def _gemini_ledger() -> dict:
+    """Server-side call ledger shared by every session on this instance.
+
+    The session budget above lives in st.session_state, so reloading the page hands
+    the visitor a fresh five — fine as a nudge, useless as a spend control on a public
+    --allow-unauthenticated endpoint. This ledger is keyed by client IP and by day, so
+    it survives reloads, and the daily total is the actual brake on the bill.
+
+    Per instance, not global: Cloud Run runs a couple of instances, so the real ceiling
+    is GEMINI_GLOBAL_DAY x instances. That is a bound, which is what matters — pair it
+    with a GCP budget alert for the account-level backstop.
+    """
+    return {"clients": {}, "day": None, "day_count": 0}
+
+
+def _client_key() -> str:
+    """Best-effort client identity. Behind Cloud Run the socket peer is the front end,
+    so the real caller is the first hop in X-Forwarded-For."""
+    try:
+        fwd = (st.context.headers.get("X-Forwarded-For") or "").split(",")[0].strip()
+        if fwd:
+            return fwd
+    except Exception:
+        pass
+    try:
+        return st.context.ip_address or "unknown"
+    except Exception:
+        return "unknown"
+
+
+def _charge_gemini() -> str | None:
+    """Take one Gemini call off the server-side limits. Returns None if allowed, else
+    the reason to show. Called only for questions that will actually hit the model."""
+    now = datetime.now(timezone.utc)
+    led = _gemini_ledger()
+    today = now.date().isoformat()
+    if led["day"] != today:
+        led["day"], led["day_count"], led["clients"] = today, 0, {}
+    if led["day_count"] >= GEMINI_GLOBAL_DAY:
+        return ("This demo has hit its daily AI budget. Everything else on the site "
+                "still works — only the Gemini answers are paused until tomorrow.")
+    key = _client_key()
+    cutoff = now.timestamp() - 3600
+    recent = [t for t in led["clients"].get(key, []) if t > cutoff]
+    if len(recent) >= GEMINI_PER_CLIENT_HOUR:
+        return (f"You've asked {GEMINI_PER_CLIENT_HOUR} AI questions in the last hour, "
+                "which is the limit for this demo. Try again a bit later — the rest of "
+                "the site is unaffected.")
+    recent.append(now.timestamp())
+    led["clients"][key] = recent
+    led["day_count"] += 1
+    return None
 
 
 def _budget_left() -> int:
@@ -2922,10 +3019,16 @@ def page_ask():
                 st.info("Pick a game first, then press Ask Gemini.")
             elif not question.strip():
                 st.info("Type a question about this game, then press Ask Gemini.")
-            elif _register(f"rag::{rag_pick}::{question.strip()}"):
-                st.session_state["rag_active"] = (rag_pick, question.strip())
-            else:
+            elif not _register(f"rag::{rag_pick}::{question.strip()}"):
                 st.warning(f"You've used all {GEMINI_BUDGET} questions this session — refresh the page to start over.")
+            else:
+                # Server-side limit is charged after the session budget so a repeat of
+                # the same question, which is served from cache, costs nothing here.
+                blocked = _charge_gemini()
+                if blocked:
+                    st.warning(blocked)
+                else:
+                    st.session_state["rag_active"] = (rag_pick, question.strip())
                 
         rag_active = st.session_state.get("rag_active")
         if rag_active:
@@ -2970,6 +3073,10 @@ def page_ask():
         if asked_now:
             if not _register(asked_now):
                 st.warning(f"You've used all {GEMINI_BUDGET} questions this session — refresh the page to start over.")
+                return
+            blocked = _charge_gemini()
+            if blocked:
+                st.warning(blocked)
                 return
             st.session_state["nl_active"] = asked_now
 
