@@ -1,33 +1,56 @@
-# BuyOrWait 🎮 — To Buy or Not to Buy
+# BuyOrWait — To Buy or Not to Buy
 
 > Steam sentiment intelligence powered by NVIDIA RAPIDS acceleration — the overall rating tells you whether a game is good, not whether it is good *for you*.
 
-**🔗 Live Demo:** [buyorwait-1047454501331.asia-southeast1.run.app](https://buyorwait-1047454501331.asia-southeast1.run.app) · **🎬 Demo Video (≤3 min):** [Watch Video](https://youtu.be/gSyqp_9bQL0) · **📊 Looker Studio:** [Interactive Dashboard](https://datastudio.google.com/reporting/46e5a8c2-ce33-4179-a456-5d68db932760)
+**Live Demo:** [buyorwait-1047454501331.asia-southeast1.run.app](https://buyorwait-1047454501331.asia-southeast1.run.app) · **Demo Video (≤3 min):** [Watch Video](https://youtu.be/gSyqp_9bQL0) · **Looker Studio:** [Interactive Dashboard](https://datastudio.google.com/reporting/46e5a8c2-ce33-4179-a456-5d68db932760)
 
-BuyOrWait is a purchase-decision tool built on **114M+ Steam reviews**. Steam's overall rating blends years-old sentiment with today's, hides games that have since been fixed or review-bombed, and says nothing about whether a game suits *your* schedule, hardware or taste. BuyOrWait computes a playtime-weighted, 90-day half-life **Purchase Confidence Score**, then adjusts it into a **Personal Fit Score** against your life rhythm, weekly time budget, hardware and play style — landing on 🟢 Buy / 🟡 Wait for Sale / 🔴 Skip with every adjustment shown so you can audit it. It raises **Bombing Alerts** via rolling z-score anomaly detection with Gemini-written cause summaries, ranks eight quality dimensions against the whole corpus in a **Friction Radar**, and answers plain-English questions over both the aggregated tables and the raw review text.
+BuyOrWait is a purchase-decision tool built on **114M+ Steam reviews**. Steam's overall rating blends years-old sentiment with today's, hides games that have since been fixed or review-bombed, and says nothing about whether a game suits *your* schedule, hardware or taste. BuyOrWait computes a playtime-weighted, 90-day half-life **Purchase Confidence Score**, then adjusts it into a **Personal Fit Score** against your life rhythm, weekly time budget, hardware and play style — landing on Buy / Wait for Sale / Skip with every adjustment shown so you can audit it. It raises **Bombing Alerts** via rolling z-score anomaly detection with Gemini-written cause summaries, ranks eight quality dimensions against the whole corpus in a **Friction Radar**, and answers plain-English questions over both the aggregated tables and the raw review text.
 
 The entire batch pipeline runs unchanged on CPU (pandas) and GPU (`cudf.pandas` on an NVIDIA L4): **~14× faster end-to-end (38.3s → 2.7s)** — turning bombing alerts from a daily batch into an hourly refresh. Stack: Cloud Storage + BigQuery (incl. vector search) + Cloud Run (Streamlit) + Gemini (Vertex AI) + Looker Studio + NVIDIA RAPIDS.
 
 ## Architecture
 
-```
-Kaggle (100M+ reviews, 17GB CSV)
-   ▼ kaggle CLI / aria2 download + convert_to_parquet.py
-Cloud Storage (Slim Parquet, no text columns, ~3-4GB)
-   ▼
-GCE g2-standard-8 (NVIDIA L4) — cudf.pandas batch processing
-   Clean → Game×Day Aggregation → Weighted Confidence Score → Bombing Detection → Phase Timings
-   ▼
-BigQuery
-   game_daily / game_scores / alerts / benchmark_results   (pipeline.py)
-   review_vectors  — 384-dim review embeddings + vector index (embed_index.py)
-   alert_causes    — Gemini "why was it bombed"             (attribute.py)
-   game_composition — purchase / free-key / Early-Access mix (composition.py)
-   daily_delta     — nightly Steam API top-up               (fetch_recent.py)
-   + v_* views merging snapshot with the live delta
-   ▼                                    ▼
-Cloud Run — Streamlit                 Looker Studio — exec dashboard
-   🎯 Person & Game Fit | 🚨 Review Bombing | 💬 Ask Gemini | 👥 Player Ownership
+```mermaid
+flowchart TD
+    subgraph Ingestion["1. Data Ingestion & Storage"]
+        Kaggle["Kaggle Steam Dataset<br/>(114M+ Reviews, 17GB CSV)"]
+        Slim["Cloud Storage<br/>(Slim Parquet, ~3-4GB)"]
+        Kaggle -->|"convert_to_parquet.py"| Slim
+    end
+
+    subgraph GPU["2. GPU Batch Processing"]
+        GCE["GCE g2-standard-8 (NVIDIA L4)<br/>cudf.pandas (~14× Acceleration)"]
+        Slim -->|"Read Parquet & Clean"| GCE
+        GCE -->|"Daily Aggregation & Score Weighting"| GCE
+        GCE -->|"Rolling z-score Bombing Detection"| GCE
+    end
+
+    subgraph Storage["3. BigQuery Data Warehouse"]
+        BQ_Daily["game_daily / game_scores / alerts"]
+        BQ_Vector["review_vectors (384-dim Embeddings)"]
+        BQ_Attribution["alert_causes (Gemini AI Summary)"]
+        BQ_Composition["game_composition (Acquisition Mix)"]
+        BQ_Delta["daily_delta (Nightly Steam API Top-up)"]
+        
+        GCE --> BQ_Daily
+        GCE --> BQ_Vector
+        GCE --> BQ_Attribution
+        GCE --> BQ_Composition
+        GCE --> BQ_Delta
+    end
+
+    subgraph Presentation["4. Presentation Layer"]
+        Streamlit["Cloud Run (Streamlit App)<br/>• Person & Game Fit<br/>• Review-Bombing Detector<br/>• Ask Gemini Intelligence<br/>• Player Ownership"]
+        Looker["Looker Studio Dashboard"]
+        
+        BQ_Daily --> Streamlit
+        BQ_Vector --> Streamlit
+        BQ_Attribution --> Streamlit
+        BQ_Composition --> Streamlit
+        BQ_Delta --> Streamlit
+        
+        BQ_Daily --> Looker
+    end
 ```
 
 The app queries only aggregated tables and one game's vectors at a time — never the 114M-row raw data.
