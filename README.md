@@ -12,45 +12,69 @@ The entire batch pipeline runs unchanged on CPU (pandas) and GPU (`cudf.pandas` 
 
 ```mermaid
 flowchart TD
+    %% 1. Ingestion Layer
     subgraph Ingestion["1. Data Ingestion & Storage"]
-        Kaggle["Kaggle Steam Dataset<br/>(114M+ Reviews, 17GB CSV)"]
-        Slim["Cloud Storage<br/>(Slim Parquet, ~3-4GB)"]
-        Kaggle -->|"convert_to_parquet.py"| Slim
+        Kaggle["Kaggle Steam Review Dataset<br/>(114M+ Reviews, 17GB CSV)"]
+        GCS["Google Cloud Storage<br/>(Slim Parquet, ~3-4GB)"]
+        Kaggle -->|"convert_to_parquet.py"| GCS
     end
 
-    subgraph GPU["2. GPU Batch Processing"]
-        GCE["GCE g2-standard-8 (NVIDIA L4)<br/>cudf.pandas (~14x Acceleration)"]
-        Slim -->|"Read Parquet & Clean"| GCE
+    %% 2. GPU Acceleration Layer
+    subgraph GPU["2. GPU Accelerated Batch Processing"]
+        GCE["GCE g2-standard-8 (NVIDIA L4 24GB)<br/>RAPIDS cudf.pandas (~14x Acceleration)"]
+        GCS -->|"Parallel Parquet Scan"| GCE
         GCE -->|"Daily Aggregation & Score Weighting"| GCE
-        GCE -->|"Rolling z-score Bombing Detection"| GCE
+        GCE -->|"Rolling z-score Anomaly Detection"| GCE
     end
 
-    subgraph Storage["3. BigQuery Data Warehouse"]
-        BQ_Daily["game_daily / game_scores / alerts"]
-        BQ_Vector["review_vectors (384-dim Embeddings)"]
-        BQ_Attribution["alert_causes (Gemini AI Summary)"]
-        BQ_Composition["game_composition (Acquisition Mix)"]
-        BQ_Delta["daily_delta (Nightly Steam API Top-up)"]
+    %% 3. BigQuery Data Warehouse
+    subgraph Storage["3. BigQuery Data Warehouse (asia-southeast1)"]
+        direction TB
+        subgraph Tables["Warehouse Tables & Views"]
+            BQ_Scores["game_scores / game_daily / alerts"]
+            BQ_Comp["game_composition (Acquisition Mix)"]
+            BQ_Vec["review_vectors (384-dim Embeddings)"]
+            BQ_Views["v_daily_all / v_scores_live (Evergreen Views)"]
+        end
         
-        GCE --> BQ_Daily
-        GCE --> BQ_Vector
-        GCE --> BQ_Attribution
-        GCE --> BQ_Composition
-        GCE --> BQ_Delta
+        subgraph AI_Loop["AI Cause Attribution Loop"]
+            Gemini["Vertex AI / Gemini 3.6 Flash"]
+            BQ_Attribution["alert_causes (AI Summaries)"]
+            BQ_Scores -.->"Trigger Alert Days"-> Gemini
+            Gemini -.->"Write Cause Summaries"-> BQ_Attribution
+        end
+
+        SteamAPI["Nightly Steam Web API"] -->|"fetch_recent.py"| BQ_Views
     end
 
-    subgraph Presentation["4. Presentation Layer"]
-        Streamlit["Cloud Run (Streamlit App)<br/>- Person & Game Fit<br/>- Review-Bombing Detector<br/>- Ask Gemini Intelligence<br/>- Player Ownership"]
-        Looker["Looker Studio Dashboard"]
-        
-        BQ_Daily --> Streamlit
-        BQ_Vector --> Streamlit
-        BQ_Attribution --> Streamlit
-        BQ_Composition --> Streamlit
-        BQ_Delta --> Streamlit
-        
-        BQ_Daily --> Looker
+    %% Pipeline connection from GPU to BigQuery
+    GCE ==>|"Batch Load (bq load)"| BQ_Scores
+    GCE ==>|"Vector Indexing & Composition"| BQ_Vec
+
+    %% 4. Presentation Layer
+    subgraph Presentation["4. Presentation & Analytics Layer"]
+        Streamlit["Cloud Run (Streamlit App)<br/>- Person & Game Fit Score<br/>- Review-Bombing Anomaly Detector<br/>- Ask Gemini Natural Language SQL / RAG<br/>- Player Ownership Breakdown"]
+        Looker["Looker Studio Executive Dashboard"]
     end
+
+    %% Single consolidated pipeline arrows to Presentation
+    BQ_Views ==>|"Query API & Vector Search"| Streamlit
+    BQ_Attribution ==>|"Attribution Cards"| Streamlit
+    BQ_Comp ==>|"Composition Breakdown"| Streamlit
+    BQ_Views -->|"SQL Views"| Looker
+
+    %% Styling Definitions
+    classDef ingestion fill:#1e293b,stroke:#475569,stroke-width:2px,color:#f8fafc;
+    classDef gpu fill:#064e3b,stroke:#10b981,stroke-width:2px,color:#f8fafc;
+    classDef storage fill:#1e3a8a,stroke:#3b82f6,stroke-width:2px,color:#f8fafc;
+    classDef ai fill:#581c87,stroke:#a855f7,stroke-width:2px,color:#f8fafc;
+    classDef presentation fill:#0f766e,stroke:#14b8a6,stroke-width:2px,color:#f8fafc;
+
+    class Kaggle,GCS ingestion;
+    class GCE gpu;
+    class BQ_Scores,BQ_Comp,BQ_Vec,BQ_Views storage;
+    class Gemini,BQ_Attribution ai;
+    class Streamlit,Looker presentation;
 ```
 
 The app queries only aggregated tables and one game's vectors at a time — never the 114M-row raw data.
