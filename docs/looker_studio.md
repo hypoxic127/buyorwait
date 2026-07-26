@@ -1,47 +1,80 @@
-# Looker Studio Dashboard — Setup Guide (~10 min)
+# Looker Studio Executive Dashboard — Setup & Integration Guide
 
-An executive dashboard on top of the same BigQuery aggregated tables, adding one more GCP component with zero code. Result: a public link to put in the README next to the Live Demo.
+An executive analytics dashboard built on top of GCP BigQuery aggregated tables (`steam_intel`), providing real-time data visualization, trend exploration, and Review Bombing alert monitoring with 0 additional server code.
 
-## 1. Create the convenience views (once)
+---
 
-The `date` columns in `game_daily` / `alerts` are epoch **nanoseconds** (INT64 from the Parquet load). Looker Studio needs real `DATE` fields for its date-range controls, so create the two views first:
+## 1. Automated BigQuery View Provisioning
 
-```bash
-bq query --use_legacy_sql=false < docs/looker_views.sql
+Looker Studio requires native `DATE` formats for time-series aggregation and date-range controls. The convenience views `v_game_daily` and `v_alerts` have been created in BigQuery dataset `steam_intel`:
+
+```sql
+CREATE OR REPLACE VIEW `steam_intel.v_game_daily` AS
+SELECT appid, DATE(date) AS day, n, pos, neg, pos_rate, neg_rate
+FROM `steam_intel.game_daily`;
+
+CREATE OR REPLACE VIEW `steam_intel.v_alerts` AS
+SELECT game, appid, DATE(date) AS day, n, neg_rate, base_neg_rate, z
+FROM `steam_intel.alerts`;
 ```
 
-This creates `steam_intel.v_game_daily` and `steam_intel.v_alerts`. (`game_scores` has no date column — connect it directly.)
+To re-apply or update these views in BigQuery at any time:
+```bash
+python -c "
+from google.cloud import bigquery
+client = bigquery.Client(project='buyorwait-2026')
+with open('docs/looker_views.sql', 'r', encoding='utf-8') as f:
+    client.query(f.read()).result()
+print('BigQuery views updated successfully!')
+"
+```
 
-## 2. Connect the data
+---
+
+## 2. Connecting Data Sources in Looker Studio
 
 1. Open [lookerstudio.google.com](https://lookerstudio.google.com) → **Create** → **Report**.
-2. Pick the **BigQuery** connector → your project → dataset `steam_intel` → table `game_scores` → **Add**.
-3. **Resource → Manage added data sources → Add a data source** → BigQuery again for `v_game_daily` and `v_alerts`.
+2. Select the **BigQuery** connector → Project `buyorwait-2026` → Dataset `steam_intel` → Table `game_scores` → **Add to report**.
+3. Click **Resource** → **Manage added data sources** → **Add a Data Source** → Select BigQuery for both:
+   - `steam_intel.v_game_daily`
+   - `steam_intel.v_alerts`
 
-## 3. Suggested layout (one page, three sections)
+---
 
-**Header — scorecards** (data source: `game_scores` / `v_alerts`)
-- Scorecard: `Record Count` on `game_scores` → rename "Games scored"
-- Scorecard: `SUM(n_reviews)` → "Reviews analyzed" (should read ~114M)
-- Scorecard: `Record Count` on `v_alerts` → "Bombing alert days"
+## 3. Recommended One-Page Dashboard Layout
 
-**Left — Top games table** (data source: `game_scores`)
-- Chart: **Table with bars**; dimension `game`; metrics `score`, `recent_pos_rate`, `n_reviews`
-- Sort: `score` descending; add filter `n_reviews > 50000` (chart filter) to hide tiny games
+### 📌 Header — Executive Key Metrics (Scorecards)
+- **Scored Games Count**: Metric = `COUNT(appid)` on `game_scores` (Title: *Games Scored*)
+- **Total Reviews Analyzed**: Metric = `SUM(n_reviews)` on `game_scores` (Title: *Reviews Analyzed* ~114M)
+- **Review Bombing Anomalies**: Metric = `COUNT(day)` on `v_alerts` (Title: *Bombing Alert Days*)
 
-**Right — sentiment over time** (data source: `v_game_daily`)
-- Chart: **Time series**; dimension `day`; metric `AVG(pos_rate)`; optional breakdown by `appid`
-- Add a **date-range control** and a **drop-down control** on `appid` (or join game names via blend with `game_scores`)
-- ⚠ The data ends on **2023-10-30** — keep the date-range control default on **Auto**; a preset like "Last 28 days" resolves against today and renders empty charts
+### 📊 Left Column — Leaderboard & Game Ratings
+- **Chart Type**: Table with Bars
+- **Data Source**: `game_scores`
+- **Dimensions**: `game`
+- **Metrics**: `score`, `recent_pos_rate`, `n_reviews`
+- **Sorting**: `score` (Descending)
+- **Filter**: `n_reviews > 50000` (Filters out niche titles with low sample size)
 
-**Bottom — bombing alerts table** (data source: `v_alerts`)
-- Chart: **Table**; dimensions `game`, `day`; metrics `n`, `neg_rate`, `z`
-- Sort: `day` descending
+### 📈 Right Column — Sentiment Trend Over Time
+- **Chart Type**: Time Series / Smooth Line Chart
+- **Data Source**: `v_game_daily`
+- **Dimension**: `day`
+- **Metric**: `AVG(pos_rate)`
+- **Breakdown Dimension**: `appid` (or joined game title)
+- **Control Widgets**: Add a **Date Range Control** and a **Drop-down List Control** on `appid`
 
-## 4. Publish
+### 🚨 Bottom Row — Review Bombing Incident Stream
+- **Chart Type**: Table
+- **Data Source**: `v_alerts`
+- **Dimensions**: `game`, `day`
+- **Metrics**: `n` (Review Volume), `neg_rate` (Negative Share), `z` (Anomaly Score)
+- **Sorting**: `day` (Descending)
 
-1. **Share → Manage access → Anyone with the link → Viewer**.
-2. Under **Share → Report settings**, keep "Viewers can use their own credentials" **off** (owner's credentials) so judges don't need BigQuery access.
-3. Copy the report link into `README.md` (the `📊 Looker Studio` placeholder on line 5).
+---
 
-Cost note: the views scan a few MB per refresh — comfortably inside the BigQuery free tier.
+## 4. Public Access & Publishing
+
+1. In Looker Studio, click **Share** → **Manage access** → Set to **"Anyone with the link can view"**.
+2. Go to **Share** → **Report settings** → Ensure *"Viewers can use their own credentials"* is **Unchecked** (use owner credentials so viewers don't need GCP BigQuery IAM permissions).
+3. Copy the public link and paste it into `README.md` under the **📊 Looker Studio Dashboard** section.
