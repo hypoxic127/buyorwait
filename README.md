@@ -40,8 +40,8 @@ flowchart TD
         subgraph AI_Loop["AI Cause Attribution Loop"]
             Gemini["Vertex AI / Gemini 3.6 Flash"]
             BQ_Attribution["alert_causes (AI Summaries)"]
-            BQ_Scores -.->"Trigger Alert Days"-> Gemini
-            Gemini -.->"Write Cause Summaries"-> BQ_Attribution
+            BQ_Scores -. "Trigger Alert Days" .-> Gemini
+            Gemini -. "Write Cause Summaries" .-> BQ_Attribution
         end
 
         SteamAPI["Nightly Steam Web API"] -->|"fetch_recent.py"| BQ_Views
