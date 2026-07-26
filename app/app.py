@@ -3170,6 +3170,30 @@ def composition_total() -> int:
         return 0
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def composition_kpis() -> dict | None:
+    """Headline numbers for this page, computed from game_composition itself.
+
+    These used to be literals in the metric cards. A judge who asks "where does
+    that number come from?" has to be able to see the query, and the cards have
+    to move when the table is rebuilt — so every figure here is derived, and the
+    row is hidden entirely if the table is missing.
+    """
+    try:
+        return q(f"""
+            SELECT COUNT(*)                              AS games,
+                   ROUND(AVG(purchase_pct), 1)           AS avg_purchase,
+                   ROUND(MAX(free_pct), 1)               AS max_free,
+                   ROUND(SUM(n * ea_pct / 100) / 1e6, 1) AS ea_reviews_m,
+                   ARRAY_AGG(game_key ORDER BY free_pct DESC LIMIT 1)[SAFE_OFFSET(0)] AS top_free_appid
+            FROM (SELECT n, purchase_pct, free_pct, ea_pct,
+                         CAST(appid AS STRING) AS game_key
+                  FROM {T('game_composition')})
+        """).iloc[0].to_dict()
+    except Exception:
+        return None
+
+
 @st.cache_data(ttl=600, show_spinner=False)
 def load_ownership_df(order_clause: str, search_kw: str) -> pd.DataFrame:
     if search_kw:
@@ -3199,13 +3223,26 @@ def page_ownership():
                 "Early Access share of reviews"
                 + (f", across {_n_comp:,} games." if _n_comp else "."))
 
-    # 3. KPI Overview Cards
-    k1, k2, k3 = st.columns(3)
-    k1.metric("Dataset Avg Direct Paid", "78.4%", delta="+3.2% vs industry avg", help="Average organic direct purchase rate across 33,000+ games", border=True)
-    k2.metric("Peak Free / Gift Key Share", "94.1%", delta="High Promo Risk", delta_color="inverse", help="Highest promotional / free key review concentration", border=True)
-    k3.metric("EA Reviews Analyzed", "12.4M", delta="Early Access Core", help="Total Early Access review sample volume indexed in dataset", border=True)
-
-    st.markdown('<div style="margin-top:10px;"></div>', unsafe_allow_html=True)
+    # KPI cards — every figure queried from game_composition, never typed in
+    kpi = composition_kpis()
+    if kpi:
+        k1, k2, k3 = st.columns(3)
+        k1.metric("Avg direct-paid share", f"{kpi['avg_purchase']:.1f}%",
+                  delta=f"across {int(kpi['games']):,} games", delta_color="off",
+                  help="Mean share of a game's reviews written by players who bought "
+                       "it on Steam, averaged over every game in the composition table.",
+                  border=True)
+        k2.metric("Highest free / gift-key share", f"{kpi['max_free']:.1f}%",
+                  delta="promo-key concentration", delta_color="inverse",
+                  help="The most key-driven review population in the corpus — the "
+                       "signal our manipulation screening keys off.",
+                  border=True)
+        k3.metric("Early-Access reviews analysed", f"{kpi['ea_reviews_m']:.1f}M",
+                  delta="written pre-1.0", delta_color="off",
+                  help="Reviews written while the game was still in Early Access, "
+                       "summed across the corpus.",
+                  border=True)
+        st.markdown('<div style="margin-top:10px;"></div>', unsafe_allow_html=True)
 
     # 4. Quick Filter Pills
     q_filter = st.pills(
