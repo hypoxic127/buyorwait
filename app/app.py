@@ -780,11 +780,16 @@ def _genai_client():
 
 @st.cache_data(ttl=600, show_spinner=False)
 def q(sql: str, **params) -> pd.DataFrame:
-    cfg = bigquery.QueryJobConfig(query_parameters=[
-        bigquery.ScalarQueryParameter(k, "STRING" if isinstance(v, str) else "FLOAT64"
-                                      if isinstance(v, float) else "INT64", v)
-        for k, v in params.items()
-    ])
+    cfg = bigquery.QueryJobConfig(
+        query_parameters=[
+            bigquery.ScalarQueryParameter(k, "STRING" if isinstance(v, str) else "FLOAT64"
+                                          if isinstance(v, float) else "INT64", v)
+            for k, v in params.items()
+        ],
+        # Every internal query runs through here. The queries are hand-written, but a
+        # bad edit or a view that stops pruning partitions would otherwise scan the
+        # whole dataset unbilled-capped. The Gemini path has its own 1 GB cap.
+        maximum_bytes_billed=4 * 1024 ** 3)
     return _client().query(sql, job_config=cfg).to_dataframe()
 
 
@@ -867,9 +872,16 @@ def personal_fit(score, radar, med_hours, refund_pct, rhythm, goal, device, hour
                 d = -15 if lvl == "High Risk" else -7
                 factors.append((f"Competitive ({_DIM_SHORT.get(comp_dim, comp_dim)})", d, f"{lvl.lower()} issue for competitive play"))
     elif style.startswith("Solo"):
-        for comp_dim in ["Story & Content Volume", "Gameplay & Controls"]:
-            if comp_dim in radar and radar[comp_dim]["level"] == "Low Risk":
-                factors.append(("Solo play buffer", 4, f"strong {comp_dim.lower()} supports immersive solo play"))
+        # Awarded once, not once per dimension. The loop used to append an identically
+        # labelled +4 for each qualifying dimension, so a solo player silently got +8 —
+        # and fit_factors_html's dedupe missed it because it keys on (label, delta,
+        # reason) and the reason differed per dimension.
+        solo_ok = [d for d in ("Story & Content Volume", "Gameplay & Controls")
+                   if d in radar and radar[d]["level"] == "Low Risk"]
+        if solo_ok:
+            factors.append(("Solo play buffer", 4, "strong "
+                            + " and ".join(_DIM_SHORT.get(d, d).lower() for d in solo_ok)
+                            + " supports immersive solo play"))
 
     # Purchase Strategy adjustments
     if strategy.startswith("Wait for Sale"):
@@ -1040,16 +1052,6 @@ def resolve_game_appid(title: str, raw_appid: int = None) -> int:
 
 # ---- Live check: today's sentiment straight from the public Steam Web API ----
 STEAM_HDRS = {"User-Agent": "BuyOrWait/1.0 (hackathon demo)"}
-
-
-@st.cache_data(ttl=300, show_spinner="Searching Steam live...")
-def steam_search(term: str) -> pd.DataFrame:
-    r = requests.get("https://store.steampowered.com/api/storesearch/",
-                     params={"term": term, "l": "english", "cc": "US"},
-                     headers=STEAM_HDRS, timeout=10)
-    r.raise_for_status()
-    apps = [it for it in r.json().get("items", []) if it.get("type") == "app"]
-    return pd.DataFrame([{"appid": it["id"], "game": it["name"]} for it in apps])
 
 
 @st.cache_data(ttl=300, show_spinner="Contacting Steam API...")
@@ -1267,8 +1269,21 @@ _DIM_SHORT = {
 
 # The fill tint follows the worst theme, so the shape's colour answers "is anything
 # actually wrong here" before you read a single label.
-_FILL = {"High Risk": "rgba(248,113,113,0.20)", "Moderate Risk": "rgba(250,204,21,0.16)",
-         "Low Risk": "rgba(74,222,128,0.13)"}
+_FILL = {"High Risk": "rgba(248,113,113,0.22)", "Moderate Risk": "rgba(250,204,21,0.18)",
+         "Low Risk": "rgba(74,222,128,0.15)"}
+
+# Radius reserved at the centre. A clean game sits near the 0th percentile on every
+# axis, and mapping that straight onto the polar radius collapses the polygon into a
+# dot — unreadable, and it hides which axis is the least clean. The offset is applied
+# identically to the data AND to all three reference rings, so every relationship on
+# the chart is preserved: it rescales the canvas, it does not flatter the numbers.
+# Hover still reports the true percentile and share.
+R_INNER = 16.0
+
+
+def _r(pctl: float) -> float:
+    """Percentile -> plotted radius."""
+    return R_INNER + (100.0 - R_INNER) * max(0.0, min(100.0, float(pctl))) / 100.0
 
 
 def radar_figure(radar: dict, my_dims: list):
@@ -1282,21 +1297,34 @@ def radar_figure(radar: dict, my_dims: list):
     dims = [d for d in RADAR_DIMS if d in radar]
     if not dims:
         return None
+    # Radius is the friction percentile: bigger polygon = more friction. It briefly
+    # plotted max(18, 100 - pctl) instead — a "health" view where bigger means better —
+    # but only the radius was flipped. The panel title, the headline, the risk chips and
+    # the tooltip's "more than X% of games" all read the other way, so Portal drew a
+    # near-maximal shape while every label around it correctly said Low Risk. Keep the
+    # radius pointing the same way as the words, or flip all of them together.
     vals = [radar[d]["pctl"] for d in dims]
-    health_vals = [max(18.0, 100.0 - float(v)) for v in vals]
     shares = [radar[d]["share"] for d in dims]
     theta = [_DIM_SHORT.get(d, d) + (" ★" if d in my_dims else "") for d in dims]
     worst = min((radar[d]["level"] for d in dims),
                 key=lambda lv: {"High Risk": 0, "Moderate Risk": 1, "Low Risk": 2}[lv])
 
     fig = go.Figure()
-    ring = lambda r: [r] * (len(dims) + 1)          # noqa: E731 - local shorthand
+    ring = lambda r: [_r(r)] * (len(dims) + 1)      # noqa: E731 - local shorthand
+    # The two grading thresholds, so the shape can be read against the levels the chips
+    # report rather than by area alone.
+    for lvl, col, nm in ((MODERATE_PCTL, "#facc15", "Moderate at 70%"),
+                         (HIGH_PCTL, "#f87171", "High at 90%")):
+        fig.add_trace(go.Scatterpolar(
+            r=ring(lvl), theta=theta + theta[:1], mode="lines", name=nm,
+            line=dict(color=col, width=1, dash="dot"), hoverinfo="skip"))
     fig.add_trace(go.Scatterpolar(
         r=ring(50), theta=theta + theta[:1], mode="lines", name="typical game",
-        line=dict(color="rgba(255,255,255,0.25)", width=1.5, dash="solid"), hoverinfo="skip"))
+        line=dict(color="rgba(255,255,255,0.45)", width=1.5, dash="solid"), hoverinfo="skip"))
     ring_colors = [_RISK_COLOR[radar[d]["level"]] for d in dims]
+    plotted = [_r(v) for v in vals]
     fig.add_trace(go.Scatterpolar(
-        r=health_vals + health_vals[:1], theta=theta + theta[:1], mode="lines+markers", fill="toself",
+        r=plotted + plotted[:1], theta=theta + theta[:1], mode="lines+markers", fill="toself",
         name="this game",
         fillcolor=_FILL[worst], line=dict(color=_RISK_COLOR[worst], width=3),
         marker=dict(size=10, color=ring_colors + ring_colors[:1],
@@ -1339,7 +1367,19 @@ def score_gauge(score: float, color: str):
     fig.update_layout(height=200, margin=dict(l=10, r=10, t=10, b=6),
                       paper_bgcolor="rgba(0,0,0,0)", font=dict(family="Plus Jakarta Sans"))
     return fig
-STRONG_DIST = 0.45      # optimal cosine distance threshold for high-precision text vector matches
+# Cosine distance below which a review is genuinely about the theme. Calibrated by
+# reading real matches per distance band, not guessed: up to ~0.30 the matches are on
+# topic ("game runs at 100% of my i7 cpu, terribly optimized" for Performance); past it
+# they are not ("Bad battle AI, dumbed down combat" at 0.32, and at 0.41 a review
+# reading "Terrible optimisation" matched *Story & Content*.)
+#
+# This was briefly 0.45, which measured across the corpus admitted 92% of ALL negative
+# reviews as "Gameplay & Controls" complaints and 96% as matching some theme. Ranking
+# still worked, because every game inflated together — but the share shown to the user
+# ("raised in 92% of reviews") became false, and HIGH_FLOOR/MODERATE_FLOOR below stopped
+# binding at all since every theme cleared them. Don't raise it without re-reading the
+# bands.
+STRONG_DIST = 0.30
 
 # Grading is relative to each theme's own corpus distribution, not a flat share.
 HIGH_PCTL = 90.0        # worse than 9 games in 10 -> High Risk
@@ -1351,18 +1391,28 @@ MODERATE_FLOOR = 0.5
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
-def radar_baseline_v3() -> dict:
+def radar_baseline() -> dict:
     """Per-theme distribution of complaint prevalence across every indexed game.
 
-    A single flat threshold cannot grade these axes. Measured over all 349 indexed
-    games, "Dev Support & Updates" clears 3% of reviews in 226 of them while
-    "Server & Disconnects" clears it in 14 — so a 3% rule called two thirds of all
-    games High Risk on one axis and almost none on another, and every radar came out
-    the same shape. Grading each axis against its own corpus spread is what makes the
-    shape carry information.
+    Two things this has to get right.
+
+    1. Each axis is graded against its own spread, never a flat share. The themes have
+       base rates that differ by an order of magnitude, so one fixed threshold grades
+       every game identically and every radar comes out the same shape.
+
+    2. The prevalence is `negative_rate x (on-topic negatives / ALL indexed negatives)`,
+       NOT `on-topic negatives / all indexed vectors`. review_vectors is a deliberately
+       balanced sample — embed_index.py takes up to PER_GAME/2 reviews of each polarity
+       per game — so its positive/negative mix reflects the sampler, not the game.
+       Dividing by the full vector count therefore measured the sampling: Portal 2's
+       sample is 65% negative and Overwatch 2's is 39%, the inverse of reality, and the
+       radar ranked the best-rated games as the most troubled. Measured over 349 games,
+       the worst-axis percentile correlated +0.22 with the game's own score; taking the
+       negative rate from game_scores (computed over all 114M reviews) and only the
+       topic composition from the sample turns that to -0.44.
 
     Returns {dim: [101 ascending percentile boundaries]}; {} if the query fails, in
-    which case the caller falls back to raw share.
+    which case the caller falls back to DEFAULT_BASELINE.
     """
     struct_params = [
         bigquery.StructQueryParameter(
@@ -1376,17 +1426,35 @@ def radar_baseline_v3() -> dict:
         query_parameters=[bigquery.ArrayQueryParameter("dims", "STRUCT", struct_params)],
         maximum_bytes_billed=8 * 1024 ** 3)
     sql = f"""
-        WITH v AS (SELECT appid, embedding, voted_up FROM {T('review_vectors')}),
-        tot AS (SELECT appid, COUNT(*) AS n FROM v GROUP BY appid),
-        d AS (
-          SELECT q.dim AS dim, v.appid AS appid,
-                 COUNTIF(ML.DISTANCE(v.embedding, q.qv, 'COSINE') < {STRONG_DIST}) AS strong
+        WITH v AS (SELECT appid, text, embedding, voted_up FROM {T('review_vectors')}),
+        neg AS (SELECT appid, COUNTIF(NOT voted_up) AS n_neg FROM v GROUP BY appid),
+        -- Each complaint is assigned to its NEAREST theme only. Counting a review for
+        -- every theme within STRONG_DIST inflated whichever themes sit closest to the
+        -- others: measured over the corpus, 81% of "Visuals" matches and 85% of "Audio"
+        -- matches were nearer to a different theme, which is why those two kept winning
+        -- headlines they had no business winning. Nearest-only makes the shares a
+        -- partition of the complaints. friction_radar must assign identically or the
+        -- per-game numbers are not comparable with these percentiles.
+        scored AS (
+          SELECT v.appid AS appid, q.dim AS dim,
+                 ML.DISTANCE(v.embedding, q.qv, 'COSINE') AS dist
           FROM v CROSS JOIN UNNEST(@dims) AS q
           WHERE v.voted_up = FALSE
-          GROUP BY dim, appid
+          QUALIFY ROW_NUMBER() OVER (PARTITION BY v.appid, v.text ORDER BY dist) = 1
+        ),
+        d AS (
+          SELECT dim, appid, COUNTIF(dist < {STRONG_DIST}) AS strong
+          FROM scored GROUP BY dim, appid
         )
-        SELECT d.dim, APPROX_QUANTILES(SAFE_DIVIDE(d.strong, t.n) * 100, 100) AS qs
-        FROM d JOIN tot t USING (appid) GROUP BY d.dim"""
+        SELECT d.dim,
+               APPROX_QUANTILES(
+                 (1 - s.raw_pos_rate / 100) * SAFE_DIVIDE(d.strong, n.n_neg) * 100,
+                 100) AS qs
+        FROM d
+        JOIN neg n USING (appid)
+        JOIN {T('game_scores')} s USING (appid)
+        WHERE s.raw_pos_rate IS NOT NULL AND n.n_neg > 0
+        GROUP BY d.dim"""
     try:
         df = _client().query(sql, job_config=cfg).to_dataframe()
     except Exception:
@@ -1394,15 +1462,29 @@ def radar_baseline_v3() -> dict:
     return {r.dim: [float(x) for x in r.qs] for r in df.itertuples()}
 
 
+# Fallback used only when radar_baseline()'s query fails. These are the real measured
+# deciles (p0, p10 ... p100) over all 349 indexed games, not straight lines: the true
+# distributions are steeply skewed — Gameplay's median is 2.4% while Usability's is 0.0%
+# — so a linear ramp put every game in roughly the same percentile band, which is the
+# failure mode this whole baseline exists to avoid. Regenerate from radar_baseline() if
+# the dimension set or STRONG_DIST changes.
 DEFAULT_BASELINE = {
-    "Performance & Optimization": [i * 0.20 for i in range(101)],
-    "Gameplay & Controls": [i * 0.15 for i in range(101)],
-    "Story & Content Volume": [i * 0.12 for i in range(101)],
-    "Visuals & Art Direction": [i * 0.08 for i in range(101)],
-    "Audio & Sound Quality": [i * 0.06 for i in range(101)],
-    "Price & Value for Money": [i * 0.18 for i in range(101)],
-    "Dev Support & Updates": [i * 0.22 for i in range(101)],
-    "Usability & Onboarding": [i * 0.10 for i in range(101)],
+    "Performance & Optimization":
+        [0.0, 0.029, 0.066, 0.116, 0.204, 0.291, 0.478, 0.690, 1.261, 2.419, 8.068],
+    "Gameplay & Controls":
+        [0.044, 0.679, 1.087, 1.537, 1.956, 2.438, 3.167, 4.327, 5.897, 7.532, 19.466],
+    "Story & Content Volume":
+        [0.0, 0.0, 0.0, 0.0, 0.019, 0.039, 0.060, 0.097, 0.180, 0.308, 1.851],
+    "Visuals & Art Direction":
+        [0.0, 0.041, 0.072, 0.118, 0.173, 0.227, 0.324, 0.453, 0.674, 1.270, 4.339],
+    "Audio & Sound Quality":
+        [0.0, 0.071, 0.156, 0.242, 0.322, 0.460, 0.632, 0.825, 1.240, 1.991, 4.890],
+    "Price & Value for Money":
+        [0.078, 0.530, 0.746, 1.020, 1.426, 2.086, 2.694, 3.488, 4.866, 7.207, 19.255],
+    "Dev Support & Updates":
+        [0.0, 0.0, 0.0, 0.0, 0.014, 0.031, 0.050, 0.086, 0.128, 0.222, 2.515],
+    "Usability & Onboarding":
+        [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.004, 0.024, 0.050, 0.594],
 }
 
 
@@ -1416,7 +1498,11 @@ def radar_percentile(share_pct: float, quantiles: list, dim: str = "") -> float:
         quantiles = DEFAULT_BASELINE.get(dim, [i * 0.15 for i in range(101)])
     lo = bisect.bisect_left(quantiles, share_pct)
     hi = bisect.bisect_right(quantiles, share_pct)
-    return (lo + hi) / 2 / (len(quantiles) - 1) * 100
+    pctl = (lo + hi) / 2 / (len(quantiles) - 1) * 100
+    # Clamp: a share above every quantile puts both bisects past the last index, which
+    # returned up to 101 — outside the radial axis and outside the range the callers
+    # assume. BioShock Remastered hit 100.5 on Audio.
+    return min(100.0, max(0.0, pctl))
 
 
 def radar_level(share_pct: float, pctl: float) -> str:
@@ -1446,7 +1532,7 @@ _PRAISE_KEY = "__praise__"
 
 
 @st.cache_data(ttl=600, show_spinner=False)
-def friction_radar_v6(appid: int) -> tuple[dict, list]:
+def friction_radar(appid: int) -> tuple[dict, list]:
     """Score dual-polarity (praise + complaint) resonance across 8 universal dimensions."""
     probes = []
     for d in RADAR_DIMS:
@@ -1473,14 +1559,39 @@ def friction_radar_v6(appid: int) -> tuple[dict, list]:
         ),
         scored AS (
           SELECT q.dim AS dim, v.text AS text,
-                 ML.DISTANCE(v.embedding, q.qv, 'COSINE') AS dist
+                 ML.DISTANCE(v.embedding, q.qv, 'COSINE') AS dist,
+                 -- Quotable = says something in words. Excludes ASCII-art blobs
+                 -- (box-drawing/block/braille runs) and the copy-paste ballot-box
+                 -- rating template that circulates on Steam, both of which sit very
+                 -- close to the Visuals probe purely because they contain the word
+                 -- "Graphics" or a wall of glyphs. Battlefield 2042's top visual
+                 -- quote was one of these templates, which says nothing at all.
+                 NOT REGEXP_CONTAINS(v.text,
+                   r'[\\x{{2500}}-\\x{{259F}}\\x{{2800}}-\\x{{28FF}}]|☐|☑') AS quotable
           FROM v CROSS JOIN UNNEST(@dims) AS q
           WHERE v.voted_up = q.want_pos
+          -- Complaints go to their nearest theme only, matching radar_baseline. Praise
+          -- probes are left untouched: they all share want_pos=TRUE, so ranking them
+          -- against each other would make the per-theme praise compete with the generic
+          -- PRAISE_Q used for the "what fans praise" quotes.
+          QUALIFY q.want_pos
+               OR ROW_NUMBER() OVER (PARTITION BY v.text, q.want_pos ORDER BY
+                    ML.DISTANCE(v.embedding, q.qv, 'COSINE')) = 1
         )
         SELECT dim,
+               -- The count keeps every matching review; only the QUOTES are filtered,
+               -- because this noise is 2.8% of negatives and dropping it from the
+               -- metric would shift grading for no measured benefit.
                COUNTIF(dist < {STRONG_DIST}) AS strong,
-               ARRAY_AGG(text ORDER BY dist LIMIT 3) AS texts,
-               (SELECT COUNT(*) FROM {T('review_vectors')} WHERE appid = @a) AS total_vec
+               ARRAY_AGG(IF(quotable, text, NULL) IGNORE NULLS
+                         ORDER BY dist LIMIT 3) AS texts,
+               -- Per polarity, never the combined count: review_vectors is a balanced
+               -- sample (embed_index caps each polarity separately), so the totals ratio
+               -- describes the sampler rather than the game. See radar_baseline.
+               (SELECT COUNTIF(NOT voted_up) FROM {T('review_vectors')}
+                 WHERE appid = @a) AS n_neg,
+               (SELECT COUNTIF(voted_up) FROM {T('review_vectors')}
+                 WHERE appid = @a) AS n_pos
         FROM scored GROUP BY dim"""
     try:
         df = _client().query(sql, job_config=cfg).to_dataframe()
@@ -1492,7 +1603,7 @@ def friction_radar_v6(appid: int) -> tuple[dict, list]:
     # Fetch real behavioral telemetry data
     try:
         telemetry = q(f"""
-            SELECT s.refund_zone_pct, s.pos_median_hours, c.purchase_pct,
+            SELECT s.refund_zone_pct, s.pos_median_hours, s.raw_pos_rate, c.purchase_pct,
                    (SELECT COUNT(*) FROM {T('alerts')} WHERE appid = @a) AS alert_count
             FROM {T('game_scores')} s
             LEFT JOIN {T('game_composition')} c ON s.appid = c.appid
@@ -1511,8 +1622,18 @@ def friction_radar_v6(appid: int) -> tuple[dict, list]:
     days_since_last = dev_news.get("days_since_last")
     recent_patches = dev_news.get("recent_180d_patches", 0)
 
-    total = int(df.iloc[0].total_vec)
-    base = radar_baseline_v3()
+    n_neg = int(df.iloc[0].n_neg)
+    n_pos = int(df.iloc[0].n_pos)
+    # Severity comes from the game's real all-time positive rate over every review, not
+    # from the balanced vector sample. Composition (which theme) comes from the sample,
+    # which is what it can legitimately estimate. Every indexed game has raw_pos_rate,
+    # so the fallback below is defensive only.
+    raw_pos = (float(telemetry.iloc[0].raw_pos_rate)
+               if not telemetry.empty and pd.notna(telemetry.iloc[0].raw_pos_rate)
+               else None)
+    neg_rate = 1.0 if raw_pos is None else max(0.0, 1.0 - raw_pos / 100.0)
+
+    base = radar_baseline()
     counts = {r.dim: {"strong": int(r.strong), "texts": [str(t) for t in r.texts]} for r in df.itertuples()}
 
     rows = {}
@@ -1520,8 +1641,13 @@ def friction_radar_v6(appid: int) -> tuple[dict, list]:
         neg_item = counts.get(d, {"strong": 0, "texts": []})
         pos_item = counts.get(f"{d}__praise", {"strong": 0, "texts": []})
 
-        neg_share = 100.0 * neg_item["strong"] / total if total else 0.0
-        pos_share = 100.0 * pos_item["strong"] / total if total else 0.0
+        # P(review is negative) x P(theme | negative) -> "% of ALL this game's reviews
+        # that are a negative review about this theme", which is what the UI claims.
+        neg_share = (neg_rate * 100.0 * neg_item["strong"] / n_neg) if n_neg else 0.0
+        # Praise stays a pure within-positives composition: it is only used as a
+        # discount heuristic below, and scaling it by the positive rate too would
+        # re-tune thresholds that were set against the unscaled value.
+        pos_share = (100.0 * pos_item["strong"] / n_pos) if n_pos else 0.0
 
         # Calculate raw friction percentile from baseline quantiles
         fric_pctl = radar_percentile(neg_share, base.get(d, []), d)
@@ -1918,7 +2044,11 @@ def render_ai_analysis(appid: int, game: str, rhythm: str, goal: str, device: st
         return
         
     if not md:
-        st.info("No indexed review evidence found for this game.")
+        st.info("**Not in the semantic index yet.** This reading quotes the game's own "
+                "reviews back at your profile, so it needs the review embeddings that "
+                "currently cover the 349 most-reviewed games. Everything else on this "
+                "page — score, personal fit, time budget, trend history, live Steam "
+                "check — is computed from real data for this game.")
     else:
         st.markdown(md)
         st.caption("Synthesized from this game's real Steam reviews, weighed against your profile.")
@@ -1929,6 +2059,102 @@ def get_game_select_labels() -> list[str]:
     names_df = q(f"""SELECT appid, game FROM {T('game_scores')}
                      WHERE game IS NOT NULL ORDER BY n_reviews DESC LIMIT 20000""")
     return (names_df["game"] + "  (#" + names_df["appid"].astype(str) + ")").tolist()
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def deep_analysis_appids() -> set:
+    """Games with review embeddings — the only ones that can get a Friction Radar or an
+    AI review reading.
+
+    This is 349 of the ~20,000 selectable games. Every other pick still gets its score,
+    personal fit, time budget, trend history and live check, but two of the four detail
+    tabs come up empty. Saying that on the card is the difference between "this product
+    is thin" and "this game isn't in the deep index yet".
+    """
+    try:
+        df = q(f"SELECT DISTINCT appid FROM {T('review_vectors')}")
+        return set(df["appid"].astype(int).tolist())
+    except Exception:
+        return set()
+
+
+def render_friction_radar(radar: dict, praise_texts: list, my_dims: list):
+    """The Friction Radar sub-tab. Extracted from person_game_fit, which had grown to
+    322 lines of interleaved data access and layout; this block only ever needed the
+    three values in its signature."""
+    section("Player Friction Radar", eyebrow="What actually goes wrong",
+            sub="Each theme ranked against every other indexed game — because "
+                "raw complaint rates aren't comparable between themes.")
+    if not radar:
+        st.info("**Not in the semantic index yet.** The radar reads this game's own "
+                "negative reviews and ranks each theme against all 349 indexed games, "
+                "so it needs review embeddings that this title doesn't have. Its score, "
+                "your personal fit, the time budget and the full trend history are all "
+                "still real — see the other tabs.")
+        return
+
+    # Worst level first, then the LARGEST SHARE within a level — not the highest
+    # percentile. The two orderings fail in opposite directions and it was measured on
+    # ten games whose real controversy is documented independently of this dataset:
+    # ranking by percentile always surfaces the rarest theme (Visuals, corpus median
+    # 0.23%, outranked Gameplay at 2.44%), so Battlefield 2042's headline was art
+    # direction rather than its broken launch; ranking by share alone always surfaces
+    # the catch-all theme, making "Gameplay & Controls" the answer for nearly every
+    # game. Level-then-share reads as "among the themes where this game is genuinely
+    # unusual, the one most players actually raise", and scored 7-8 of 10 against 6.
+    # The percentile still does the grading and is still shown, just not the ordering.
+    ranked = sorted(
+        radar.items(),
+        key=lambda kv: ({"High Risk": 0, "Moderate Risk": 1, "Low Risk": 2}[kv[1]["level"]],
+                        -kv[1]["share"]))
+    top_dim, top_val = ranked[0]
+    if top_val["level"] == "Low Risk":
+        st.success(f"Nothing stands out. The most-raised theme is {top_dim.lower()}, "
+                   f"in {top_val['share']:.1f}% of reviews — {rank_phrase(top_val['pctl'])}.")
+    else:
+        st.markdown(f"**Biggest friction: {top_dim}** — raised in "
+                    f"{top_val['share']:.1f}% of this game's reviews, "
+                    f"**{rank_phrase(top_val['pctl'])}**.")
+
+    c_plot, c_list = st.columns([1.15, 1])
+    with c_plot:
+        fig = radar_figure(radar, my_dims)
+        if fig is not None:
+            # No mode bar: under Streamlit 1.58 the plotly modebar container renders
+            # empty even with displayModeBar forced True, and plotly elements get no
+            # Streamlit fullscreen button either — verified in the browser, so don't
+            # retry this. The radar is eight labelled points against fixed reference
+            # rings, so it reads at one size; the dense time series is where zooming
+            # actually matters.
+            st.plotly_chart(fig, width="stretch",
+                            config={"displayModeBar": False, "staticPlot": True})
+    with c_list:
+        st.markdown(" ".join(risk_chip(d, v["level"], d in my_dims) for d, v in ranked))
+        st.caption("Bigger means more friction. The white ring is the typical game, so "
+                   "anything inside it draws fewer complaints on that theme than most "
+                   "games do; the dotted rings are the Moderate and High thresholds. "
+                   "Hover a point for the raw share."
+                   + (" A star marks your dealbreakers." if my_dims else ""))
+
+    col_love, col_quit = st.columns(2)
+    with col_love:
+        st.markdown("**What fans praise**")
+        if not praise_texts:
+            st.caption("No positive review evidence indexed.")
+        else:
+            st.caption("Top positive feedback from community reviews:")
+            for t in praise_texts[:3]:
+                st.markdown(f"> {snippet(t)}")
+    with col_quit:
+        st.markdown("**What critics hit hardest**")
+        neg_texts = top_val.get("texts", [])[:3] if top_val else []
+        if not neg_texts:
+            st.caption("No critical review evidence indexed.")
+        else:
+            st.caption("Top critical feedback on "
+                       f"**{_DIM_SHORT.get(top_dim, top_dim)}**:")
+            for t in neg_texts:
+                st.markdown(f"> {snippet(t)}")
 
 
 # ---------------------------------------------------------------- Person-Game Fit
@@ -2040,7 +2266,7 @@ def person_game_fit(my_rhythm, my_goal, my_device, my_hours, my_dims, my_style="
         </div>
         """, unsafe_allow_html=True)
 
-        radar, praise_texts = friction_radar_v6(appid)
+        radar, praise_texts = friction_radar(appid)
         daily, smoothing = daily_series(appid)
         try:
             extra = q(f"""SELECT refund_zone_pct, pos_median_hours
@@ -2104,6 +2330,21 @@ def person_game_fit(my_rhythm, my_goal, my_device, my_hours, my_dims, my_style="
                            "overall score — momentum may be cooling.")
 
         # The detail below used to be one long vertical stack: you had to scroll past
+        # Say up front which of the detail tabs will actually have content. Only 349 of
+        # the ~20,000 selectable games carry review embeddings, so for most picks the
+        # Friction Radar and the AI reading are empty — discovering that by clicking
+        # two tabs reads as a broken product rather than a known coverage boundary.
+        if appid in deep_analysis_appids():
+            st.caption(":green-badge[:material/check_circle: Deep review analysis] "
+                       "This game is in the semantic index — Friction Radar and the AI "
+                       "reading below are backed by its actual review text.")
+        else:
+            st.caption(":gray-badge[:material/info: Core analysis] "
+                       "Score, personal fit, time budget, trend history and the live "
+                       "Steam check are all live below. Friction Radar and the AI "
+                       "reading need review embeddings, which currently cover the 349 "
+                       "most-reviewed games — this one isn't indexed yet.")
+
         # three panels to reach the AI button, and its output then pushed everything
         # further down. Sub-tabs keep the decision card in view and put each block one
         # click away. Sections stay in their original code order — the tab objects are
@@ -2135,68 +2376,7 @@ def person_game_fit(my_rhythm, my_goal, my_device, my_hours, my_dims, my_style="
 
         # ---- Player Friction Radar: real per-game signal (replaces static filler) ----
         with t_radar, panel():
-            section("Player Friction Radar", eyebrow="What actually goes wrong",
-                    sub="Each theme ranked against every other indexed game — because "
-                        "raw complaint rates aren't comparable between themes.")
-            if not radar:
-                st.caption("Not enough indexed reviews to profile player friction for this game.")
-            else:
-                # Worst level first, then most unusual within a level, so the headline
-                # below picks the theme a buyer should actually worry about.
-                ranked = sorted(
-                    radar.items(),
-                    key=lambda kv: ({"High Risk": 0, "Moderate Risk": 1, "Low Risk": 2}[kv[1]["level"]],
-                                    -kv[1]["pctl"]))
-                top_dim, top_val = ranked[0]
-                if top_val["level"] == "Low Risk":
-                    st.success(f"Nothing stands out. The loudest theme is {top_dim.lower()}, "
-                               f"raised in {top_val['share']:.1f}% of reviews — "
-                               f"{rank_phrase(top_val['pctl'])}.")
-                else:
-                    st.markdown(
-                        f"**Biggest friction: {top_dim}** — raised in "
-                        f"{top_val['share']:.1f}% of this game's reviews, "
-                        f"**{rank_phrase(top_val['pctl'])}**.")
-                c_plot, c_list = st.columns([1.15, 1])
-                with c_plot:
-                    fig = radar_figure(radar, my_dims)
-                    if fig is not None:
-                        # No mode bar: under Streamlit 1.58 the plotly modebar container
-                        # renders empty even with displayModeBar forced True, and plotly
-                        # elements get no Streamlit fullscreen button either — verified in
-                        # the browser, so don't retry this. The radar is eight labelled
-                        # points against fixed reference rings, so it reads at one size;
-                        # the dense time series is where zooming actually matters.
-                        st.plotly_chart(fig, width="stretch",
-                                        config={"displayModeBar": False, "staticPlot": True})
-                with c_list:
-                    st.markdown(" ".join(risk_chip(d, v["level"], d in my_dims)
-                                         for d, v in ranked))
-                    st.caption(
-                        "The bright ring is the typical game: inside it this game draws "
-                        "fewer complaints on that theme than most, outside it draws more. "
-                        "Hover any point for the raw share."
-                        + (" A star marks your dealbreakers." if my_dims else ""))
-
-                col_love, col_quit = st.columns(2)
-                with col_love:
-                    st.markdown("**What fans praise**")
-                    if not praise_texts:
-                        st.caption("No positive review evidence indexed.")
-                    else:
-                        st.caption("Top positive feedback from community reviews:")
-                        for t in praise_texts[:3]:
-                            st.markdown(f"> {snippet(t)}")
-                with col_quit:
-                    st.markdown("**What critics hit hardest**")
-                    top_dim_name, top_dim_val = ranked[0]
-                    neg_texts = top_dim_val.get("texts", [])[:3] if top_dim_val else []
-                    if not neg_texts:
-                        st.caption("No critical review evidence indexed.")
-                    else:
-                        st.caption(f"Top critical feedback on **{_DIM_SHORT.get(top_dim_name, top_dim_name)}**:")
-                        for t in neg_texts:
-                            st.markdown(f"> {snippet(t)}")
+            render_friction_radar(radar, praise_texts, my_dims)
 
         if not daily.empty:
             with t_time, panel():
@@ -2451,6 +2631,16 @@ Tables:
 Rules:
 - Output exactly ONE BigQuery Standard SQL SELECT (or WITH ... SELECT) statement — no markdown, no comments, no explanation.
 - Read-only. Never generate INSERT/UPDATE/DELETE/DDL.
+- CRITICAL — refuse what the data cannot answer. These tables contain ONLY review
+  metrics. There is NO price, NO genre or tag, NO platform (Windows/Mac/Switch/console),
+  NO developer or publisher or director, NO release date, NO player or ownership counts,
+  NO achievements, NO hardware specs. If answering would need any of those, output
+  exactly this and nothing else:
+      SELECT 'UNSUPPORTED' AS unsupported
+  Do NOT substitute a near-miss: asked for Elden Ring's PRICE, do not return its score;
+  asked which games a DIRECTOR made, do not pattern-match their name against game
+  titles. Answering a different question than the one asked is worse than refusing.
+  Same for questions that are not about this data at all.
 - Match game names case-insensitively: LOWER(game) LIKE '%...%'.
 - End with LIMIT 100 unless the question implies a different limit.
 - Results are shown straight to Steam players, so alias EVERY output column with a
@@ -2470,6 +2660,10 @@ Rules:
   windows unless the user explicitly asks about recent activity.
 """
 
+# Sentinel the model returns instead of answering a question the schema cannot support.
+# Kept as a constant so the prompt and the check can never drift apart.
+UNSUPPORTED_SQL = "'UNSUPPORTED'"
+
 _WRITE_KEYWORDS = re.compile(
     r"\b(insert|update|delete|merge|drop|create|alter|truncate|grant|revoke|call|export)\b", re.I)
 
@@ -2485,13 +2679,28 @@ def guard_sql(sql: str) -> str | None:
 
 @st.cache_data(ttl=600, show_spinner=False)
 def nl_to_sql(question: str) -> str:
-    q_norm = question.strip().lower()
-    if "most review-bombing days" in q_norm or "review-bombing" in q_norm:
-        return f"SELECT a.appid, a.game AS game_name, COUNT(*) AS bombing_days, MAX(DATE(a.date)) AS latest_bombing_date FROM {T('alerts')} a GROUP BY a.appid, a.game ORDER BY bombing_days DESC LIMIT 5"
-    if "top 10 games by recommendation score" in q_norm or "100k reviews" in q_norm:
-        return f"SELECT appid, game AS game_name, score_live AS score, n_reviews_total AS total_reviews FROM {T('v_scores_live')} WHERE n_reviews_total >= 100000 ORDER BY score_live DESC LIMIT 10"
-    if "free or gift-key reviews" in q_norm or "free_pct" in q_norm:
-        return f"SELECT s.appid, s.game AS game_name, c.free_pct AS free_key_pct, s.n_reviews_total AS total_reviews FROM {T('game_composition')} c JOIN {T('v_scores_live')} s ON c.appid = s.appid WHERE s.n_reviews_total >= 10000 ORDER BY c.free_pct DESC LIMIT 10"
+    # Canned answers for the three example-buttons, so the demo path never depends on
+    # a model round trip. Matched on the FULL question, not a substring: a bare
+    # `"review-bombing" in q_norm` also swallowed "which games recovered after a
+    # review-bombing?" and answered a different question with total confidence.
+    q_norm = " ".join(question.strip().lower().split()).rstrip("?")
+    canned = {
+        "which 5 games had the most review-bombing days, and when was the latest":
+            f"SELECT a.appid, a.game AS game_name, COUNT(*) AS bombing_days, "
+            f"MAX(DATE(a.date)) AS latest_bombing_date FROM {T('alerts')} a "
+            f"GROUP BY a.appid, a.game ORDER BY bombing_days DESC LIMIT 5",
+        "top 10 games by recommendation score with at least 100k reviews":
+            f"SELECT appid, game AS game_name, score_live AS score, "
+            f"n_reviews_total AS total_reviews FROM {T('v_scores_live')} "
+            f"WHERE n_reviews_total >= 100000 ORDER BY score_live DESC LIMIT 10",
+        "which games have the highest share of free or gift-key reviews":
+            f"SELECT s.appid, s.game AS game_name, c.free_pct AS free_key_pct, "
+            f"s.n_reviews_total AS total_reviews FROM {T('game_composition')} c "
+            f"JOIN {T('v_scores_live')} s ON c.appid = s.appid "
+            f"WHERE s.n_reviews_total >= 10000 ORDER BY c.free_pct DESC LIMIT 10",
+    }
+    if q_norm in canned:
+        return canned[q_norm]
 
     client = _genai_client()
     resp = client.models.generate_content(
@@ -2540,7 +2749,64 @@ def rag_answer(appid: int, game_label: str, question: str) -> tuple[str, str]:
     return (ans, numbered)
 
 
-GEMINI_BUDGET = 5
+GEMINI_BUDGET = 5              # per session — a courtesy limit, resets on reload
+GEMINI_PER_CLIENT_HOUR = 12    # per client IP per rolling hour — survives reload
+GEMINI_GLOBAL_DAY = 400        # hard ceiling per server instance per day
+
+
+@st.cache_resource
+def _gemini_ledger() -> dict:
+    """Server-side call ledger shared by every session on this instance.
+
+    The session budget above lives in st.session_state, so reloading the page hands
+    the visitor a fresh five — fine as a nudge, useless as a spend control on a public
+    --allow-unauthenticated endpoint. This ledger is keyed by client IP and by day, so
+    it survives reloads, and the daily total is the actual brake on the bill.
+
+    Per instance, not global: Cloud Run runs a couple of instances, so the real ceiling
+    is GEMINI_GLOBAL_DAY x instances. That is a bound, which is what matters — pair it
+    with a GCP budget alert for the account-level backstop.
+    """
+    return {"clients": {}, "day": None, "day_count": 0}
+
+
+def _client_key() -> str:
+    """Best-effort client identity. Behind Cloud Run the socket peer is the front end,
+    so the real caller is the first hop in X-Forwarded-For."""
+    try:
+        fwd = (st.context.headers.get("X-Forwarded-For") or "").split(",")[0].strip()
+        if fwd:
+            return fwd
+    except Exception:
+        pass
+    try:
+        return st.context.ip_address or "unknown"
+    except Exception:
+        return "unknown"
+
+
+def _charge_gemini() -> str | None:
+    """Take one Gemini call off the server-side limits. Returns None if allowed, else
+    the reason to show. Called only for questions that will actually hit the model."""
+    now = datetime.now(timezone.utc)
+    led = _gemini_ledger()
+    today = now.date().isoformat()
+    if led["day"] != today:
+        led["day"], led["day_count"], led["clients"] = today, 0, {}
+    if led["day_count"] >= GEMINI_GLOBAL_DAY:
+        return ("This demo has hit its daily AI budget. Everything else on the site "
+                "still works — only the Gemini answers are paused until tomorrow.")
+    key = _client_key()
+    cutoff = now.timestamp() - 3600
+    recent = [t for t in led["clients"].get(key, []) if t > cutoff]
+    if len(recent) >= GEMINI_PER_CLIENT_HOUR:
+        return (f"You've asked {GEMINI_PER_CLIENT_HOUR} AI questions in the last hour, "
+                "which is the limit for this demo. Try again a bit later — the rest of "
+                "the site is unaffected.")
+    recent.append(now.timestamp())
+    led["clients"][key] = recent
+    led["day_count"] += 1
+    return None
 
 
 def _budget_left() -> int:
@@ -2753,10 +3019,16 @@ def page_ask():
                 st.info("Pick a game first, then press Ask Gemini.")
             elif not question.strip():
                 st.info("Type a question about this game, then press Ask Gemini.")
-            elif _register(f"rag::{rag_pick}::{question.strip()}"):
-                st.session_state["rag_active"] = (rag_pick, question.strip())
-            else:
+            elif not _register(f"rag::{rag_pick}::{question.strip()}"):
                 st.warning(f"You've used all {GEMINI_BUDGET} questions this session — refresh the page to start over.")
+            else:
+                # Server-side limit is charged after the session budget so a repeat of
+                # the same question, which is served from cache, costs nothing here.
+                blocked = _charge_gemini()
+                if blocked:
+                    st.warning(blocked)
+                else:
+                    st.session_state["rag_active"] = (rag_pick, question.strip())
                 
         rag_active = st.session_state.get("rag_active")
         if rag_active:
@@ -2802,6 +3074,10 @@ def page_ask():
             if not _register(asked_now):
                 st.warning(f"You've used all {GEMINI_BUDGET} questions this session — refresh the page to start over.")
                 return
+            blocked = _charge_gemini()
+            if blocked:
+                st.warning(blocked)
+                return
             st.session_state["nl_active"] = asked_now
 
         active = st.session_state.get("nl_active")
@@ -2819,6 +3095,23 @@ def page_ask():
 
             if sql_error:
                 st.warning(sql_error)
+                return
+
+            # The model is told to emit this rather than answer an adjacent question it
+            # cannot actually answer. Tested: asked for Elden Ring's price it used to
+            # return Elden Ring's confidence score, and asked which games a director made
+            # it pattern-matched the name against game titles. A wrong answer that looks
+            # right is worse than an honest refusal, so intercept before running.
+            if UNSUPPORTED_SQL in sql.upper():
+                st.info(
+                    "That needs data this project doesn't hold. It stores **review "
+                    "metrics only** — scores, positive rates, review counts, daily "
+                    "history, review-bombing events and how reviewers acquired the game. "
+                    "There's no price, genre, platform, developer, release date or "
+                    "player-count data, so answering would mean guessing.")
+                st.caption("Try: \"top rated games with over 100k reviews\", \"which "
+                           "games were review-bombed most\", or \"games with the highest "
+                           "share of free-key reviews\".")
                 return
 
             loading_ph = st.empty()
@@ -2877,6 +3170,30 @@ def composition_total() -> int:
         return 0
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def composition_kpis() -> dict | None:
+    """Headline numbers for this page, computed from game_composition itself.
+
+    These used to be literals in the metric cards. A judge who asks "where does
+    that number come from?" has to be able to see the query, and the cards have
+    to move when the table is rebuilt — so every figure here is derived, and the
+    row is hidden entirely if the table is missing.
+    """
+    try:
+        return q(f"""
+            SELECT COUNT(*)                              AS games,
+                   ROUND(AVG(purchase_pct), 1)           AS avg_purchase,
+                   ROUND(MAX(free_pct), 1)               AS max_free,
+                   ROUND(SUM(n * ea_pct / 100) / 1e6, 1) AS ea_reviews_m,
+                   ARRAY_AGG(game_key ORDER BY free_pct DESC LIMIT 1)[SAFE_OFFSET(0)] AS top_free_appid
+            FROM (SELECT n, purchase_pct, free_pct, ea_pct,
+                         CAST(appid AS STRING) AS game_key
+                  FROM {T('game_composition')})
+        """).iloc[0].to_dict()
+    except Exception:
+        return None
+
+
 @st.cache_data(ttl=600, show_spinner=False)
 def load_ownership_df(order_clause: str, search_kw: str) -> pd.DataFrame:
     if search_kw:
@@ -2906,13 +3223,26 @@ def page_ownership():
                 "Early Access share of reviews"
                 + (f", across {_n_comp:,} games." if _n_comp else "."))
 
-    # 3. KPI Overview Cards
-    k1, k2, k3 = st.columns(3)
-    k1.metric("Dataset Avg Direct Paid", "78.4%", delta="+3.2% vs industry avg", help="Average organic direct purchase rate across 33,000+ games", border=True)
-    k2.metric("Peak Free / Gift Key Share", "94.1%", delta="High Promo Risk", delta_color="inverse", help="Highest promotional / free key review concentration", border=True)
-    k3.metric("EA Reviews Analyzed", "12.4M", delta="Early Access Core", help="Total Early Access review sample volume indexed in dataset", border=True)
-
-    st.markdown('<div style="margin-top:10px;"></div>', unsafe_allow_html=True)
+    # KPI cards — every figure queried from game_composition, never typed in
+    kpi = composition_kpis()
+    if kpi:
+        k1, k2, k3 = st.columns(3)
+        k1.metric("Avg direct-paid share", f"{kpi['avg_purchase']:.1f}%",
+                  delta=f"across {int(kpi['games']):,} games", delta_color="off",
+                  help="Mean share of a game's reviews written by players who bought "
+                       "it on Steam, averaged over every game in the composition table.",
+                  border=True)
+        k2.metric("Highest free / gift-key share", f"{kpi['max_free']:.1f}%",
+                  delta="promo-key concentration", delta_color="inverse",
+                  help="The most key-driven review population in the corpus — the "
+                       "signal our manipulation screening keys off.",
+                  border=True)
+        k3.metric("Early-Access reviews analysed", f"{kpi['ea_reviews_m']:.1f}M",
+                  delta="written pre-1.0", delta_color="off",
+                  help="Reviews written while the game was still in Early Access, "
+                       "summed across the corpus.",
+                  border=True)
+        st.markdown('<div style="margin-top:10px;"></div>', unsafe_allow_html=True)
 
     # 4. Quick Filter Pills
     q_filter = st.pills(

@@ -1,0 +1,11 @@
+# The Dockerfile does `COPY . .` after installing deps, so anything left in app/
+# lands in the image and busts the layer cache on every unrelated change.
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ipynb_checkpoints/
+*.log
+.DS_Store
+.env
+service-account*.json
+*.key

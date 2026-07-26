@@ -112,8 +112,11 @@ python pipeline/attribute.py       # alert_causes     — Gemini "why was it bom
 python pipeline/composition.py     # game_composition — purchase / free-key / Early Access mix
 python pipeline/fetch_recent.py    # daily_delta      — nightly Steam API top-up (run on a schedule)
 
-# 5. Evergreen views that merge the 2023 snapshot with the nightly delta
-bq query --use_legacy_sql=false < docs/evergreen.sql
+# 5. BigQuery views/tables — evergreen first (alerts_live.sql reads v_daily_all)
+bq query --use_legacy_sql=false < docs/evergreen.sql    # v_daily_all, v_scores_live, v_freshness
+bq query --use_legacy_sql=false < docs/alerts_live.sql  # alerts_recent, v_alerts_all, alert_causes
+# Schedule the first block of alerts_live.sql as a daily scheduled query (03:30 SGT,
+# right after the nightly fetch) so post-snapshot bombing events keep being detected.
 
 # 6. App (local)
 cd app && pip install -r requirements.txt
@@ -144,8 +147,18 @@ pipeline/     convert_to_parquet.py  CSV -> slim Parquet
               fetch_recent.py        nightly Steam API incremental fetch
 app/          app.py, Dockerfile (Cloud Run), .streamlit/config.toml (native theme), assets/
 benchmarks/   benchmark_results.csv, nvidia-smi.png, hardware details
-docs/         app screenshots + BigQuery view definitions (evergreen, Looker)
+docs/         WALKTHROUGH.md        end-to-end system walkthrough + live demo script
+              evergreen.sql         daily merge views + evergreen score + alignment check
+              alerts_live.sql       nightly alert recompute, unified alert view, causes table
+              looker_views.sql, looker_studio.md, app screenshots
 ```
+
+## Walkthrough
+
+[docs/WALKTHROUGH.md](docs/WALKTHROUGH.md) walks the whole system in execution order — data in,
+GPU batch, the evergreen-score trick, each enrichment layer, orchestration, and every page of
+the app — then doubles as the live demo script (click path, narration, and the answers to the
+questions this design invites).
 
 ## License
 
