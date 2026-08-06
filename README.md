@@ -12,7 +12,7 @@
 One of five award-winning projects out of **1,049 prototypes** built during the Academy,
 from 141,406+ registrations across Asia Pacific.
 
-**[Live Demo](https://buyorwait-1047454501331.asia-southeast1.run.app)** | **[Demo Video (≤3 min)](https://youtu.be/gSyqp_9bQL0)** | **[Looker Studio Dashboard](https://datastudio.google.com/reporting/46e5a8c2-ce33-4179-a456-5d68db932760)**
+**[Live Demo](https://buyorwait-1047454501331.asia-southeast1.run.app)** | **[Demo Video (≤3 min)](https://drive.google.com/file/d/1aMJzKrKsfrs9s_pNlaYN03KzuOqPdaSb/view?usp=sharing)** | **[Looker Studio Dashboard](https://datastudio.google.com/reporting/46e5a8c2-ce33-4179-a456-5d68db932760)**
 
 ---
 
