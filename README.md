@@ -2,6 +2,16 @@
 
 > Steam sentiment intelligence powered by NVIDIA RAPIDS acceleration — the overall rating tells you whether a game is good, not whether it is good *for you*.
 
+![Performance Excellence Award — Best Use of NVIDIA Tools](docs/award-card.svg)
+
+[![Award](https://img.shields.io/badge/Performance_Excellence_Award-Best_Use_of_NVIDIA_Tools-76B900?style=flat-square&logo=nvidia&logoColor=white)](#)
+[![Academy](https://img.shields.io/badge/Google_Cloud_Gen_AI_Academy-APAC_2026-4285F4?style=flat-square&logo=googlecloud&logoColor=white)](#)
+[![Speedup](https://img.shields.io/badge/RAPIDS_cudf.pandas-14×_faster-76B900?style=flat-square)](#benchmarks)
+[![Scale](https://img.shields.io/badge/reviews_analysed-114,381,811-1e293b?style=flat-square)](#benchmarks)
+
+One of five award-winning projects out of **1,049 prototypes** built during the Academy,
+from 141,406+ registrations across Asia Pacific.
+
 **[Live Demo](https://buyorwait-1047454501331.asia-southeast1.run.app)** | **[Demo Video (≤3 min)](https://youtu.be/gSyqp_9bQL0)** | **[Looker Studio Dashboard](https://datastudio.google.com/reporting/46e5a8c2-ce33-4179-a456-5d68db932760)**
 
 ---
@@ -171,6 +181,23 @@ Same GCE `g2-standard-8` instance, dual run over **114,381,811 rows**: 8 vCPUs (
 
 ![nvidia-smi on the GCE L4 instance during the GPU run](benchmarks/nvidia-smi.png)
 
+### How this number was actually earned
+
+The first GPU run was **slower** than the CPU baseline. Two operations were silently
+falling back to host memory and dragging 114M rows across the bus each time:
+review age computed as a `timedelta` (`.dt.days`), and a second `groupby` + `merge`
+for the recent-window stats. End-to-end timing hid this — the win in one stage was
+paying for the loss in another.
+
+Timing every stage separately exposed it. Replacing the timedelta with an integer
+day index and fusing the two aggregations into one pass is where most of the 14x
+came from. The other prerequisite: **RMM's pool allocator has to be initialised
+before pandas is imported**, or cuDF and the default allocator fight over the same
+memory and the process corrupts its own heap.
+
+The lesson is the reason this table exists at all: a GPU does not make code fast.
+Measuring per stage — and finding where the GPU *isn't being used* — does.
+
 
 ## Metric Definitions
 
@@ -327,6 +354,13 @@ buyorwait/
 ├── cloudbuild.yaml                Cloud Build CI/CD pipeline
 └── LICENSE                        MIT
 ```
+
+## Engineering Record
+
+[docs/REFINEMENT_SPRINT.md](docs/REFINEMENT_SPRINT.md) — what changed in the final
+refinement week and why: the evergreen-score design, the nightly ingestion loop, the
+GPU benchmark that started out *slower* than CPU, and the features deliberately not
+built (managed vector DB, GKE, streaming) with the reasoning for each.
 
 ## Walkthrough
 

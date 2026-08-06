@@ -1,0 +1,41 @@
+<svg width="1200" height="630" viewBox="0 0 1200 630" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Performance Excellence Award, Best Use of NVIDIA Tools — BuyOrWait, Google Cloud Gen AI Academy APAC 2026, one of five award winners out of 1,049 prototypes">
+  <title>BuyOrWait — Best Use of NVIDIA Tools</title>
+  <rect x="0" y="0" width="1200" height="630" fill="#0b111c"/>
+  <rect x="0" y="0" width="1200" height="7" fill="#76B900"/>
+
+  <g font-family="'Inter','Segoe UI',system-ui,-apple-system,sans-serif">
+    <text x="80" y="108" fill="#76B900" font-size="20" font-weight="600" letter-spacing="3">PERFORMANCE EXCELLENCE AWARD</text>
+
+    <text x="80" y="190" fill="#f8fafc" font-size="62" font-weight="700">Best Use of NVIDIA Tools</text>
+    <text x="80" y="238" fill="#94a3b8" font-size="24">Google Cloud Gen AI Academy APAC 2026 · Team CuDecision</text>
+
+    <line x1="80" y1="292" x2="1120" y2="292" stroke="#1e293b" stroke-width="1"/>
+
+    <text x="80" y="336" fill="#64748b" font-size="18">Reviews re-scored</text>
+    <text x="80" y="386" fill="#f8fafc" font-size="42" font-weight="700">114,381,811</text>
+
+    <text x="450" y="336" fill="#64748b" font-size="18">Full batch on an NVIDIA L4</text>
+    <text x="450" y="386" fill="#f8fafc" font-size="42" font-weight="700">38.32s → 2.75s</text>
+
+    <text x="880" y="336" fill="#64748b" font-size="18">Zero code changes</text>
+    <text x="880" y="386" fill="#76B900" font-size="42" font-weight="700">~14× faster</text>
+
+    <rect x="80" y="446" width="1040" height="120" rx="14" fill="#111a28"/>
+
+    <text x="120" y="486" fill="#64748b" font-size="16">Prototypes built</text>
+    <text x="120" y="524" fill="#94a3b8" font-size="30" font-weight="600">1,049</text>
+
+    <text x="272" y="514" fill="#334155" font-size="26">→</text>
+
+    <text x="330" y="486" fill="#64748b" font-size="16">Final round</text>
+    <text x="330" y="524" fill="#cbd5e1" font-size="30" font-weight="600">Top 100</text>
+
+    <text x="510" y="514" fill="#334155" font-size="26">→</text>
+
+    <text x="568" y="486" fill="#64748b" font-size="16">Award winners</text>
+    <text x="568" y="524" fill="#76B900" font-size="30" font-weight="600">1 of 5</text>
+
+    <text x="1080" y="494" fill="#475569" font-size="16" text-anchor="end">from 141,406+ registrations across APAC</text>
+    <text x="1080" y="528" fill="#64748b" font-size="20" font-weight="600" text-anchor="end">BuyOrWait</text>
+  </g>
+</svg>
