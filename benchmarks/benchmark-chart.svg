@@ -1,0 +1,62 @@
+<svg width="1200" height="656" viewBox="0 0 1200 656" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Per-stage benchmark: pandas on 8 vCPUs versus cudf.pandas on an NVIDIA L4, over 114,381,811 rows. End to end 38.32 seconds to 2.75 seconds, about 14 times faster.">
+  <title>BuyOrWait pipeline — CPU vs NVIDIA L4, by stage</title>
+  <rect x="0" y="0" width="1200" height="656" fill="#0b111c"/>
+
+  <g font-family="'Inter','Segoe UI',system-ui,-apple-system,sans-serif">
+    <text x="48" y="56" fill="#94a3b8" font-size="18">114,381,811 rows · same GCE g2-standard-8 · zero code changes</text>
+
+    <text x="48" y="112" fill="#f8fafc" font-size="40" font-weight="700">38.32s</text>
+    <text x="176" y="112" fill="#475569" font-size="32">→</text>
+    <text x="226" y="112" fill="#76B900" font-size="40" font-weight="700">2.75s</text>
+    <text x="352" y="112" fill="#64748b" font-size="20">end to end, ~14× faster</text>
+
+    <rect x="920" y="76" width="16" height="16" rx="3" fill="#475569"/>
+    <text x="946" y="90" fill="#94a3b8" font-size="17">pandas · 8 vCPU</text>
+    <rect x="920" y="104" width="16" height="16" rx="3" fill="#76B900"/>
+    <text x="946" y="118" fill="#94a3b8" font-size="17">cudf.pandas · NVIDIA L4</text>
+
+    <line x1="48" y1="150" x2="1152" y2="150" stroke="#1e293b" stroke-width="1"/>
+
+    <text x="48" y="196" fill="#cbd5e1" font-size="19">read_parquet</text>
+    <rect x="300" y="180" width="96" height="15" rx="3" fill="#475569"/>
+    <rect x="300" y="202" width="41" height="15" rx="3" fill="#76B900"/>
+    <text x="408" y="193" fill="#64748b" font-size="16">1.69s</text>
+    <text x="353" y="215" fill="#64748b" font-size="16">0.73s</text>
+    <text x="1152" y="204" fill="#94a3b8" font-size="22" font-weight="600" text-anchor="end">2.3×</text>
+
+    <text x="48" y="276" fill="#cbd5e1" font-size="19">clean_cast</text>
+    <rect x="300" y="260" width="509" height="15" rx="3" fill="#475569"/>
+    <rect x="300" y="282" width="19" height="15" rx="3" fill="#76B900"/>
+    <text x="821" y="273" fill="#64748b" font-size="16">8.97s</text>
+    <text x="331" y="295" fill="#64748b" font-size="16">0.33s</text>
+    <text x="1152" y="284" fill="#94a3b8" font-size="22" font-weight="600" text-anchor="end">26.9×</text>
+
+    <text x="48" y="356" fill="#cbd5e1" font-size="19">daily_groupby</text>
+    <rect x="300" y="340" width="649" height="15" rx="3" fill="#475569"/>
+    <rect x="300" y="362" width="18" height="15" rx="3" fill="#76B900"/>
+    <text x="961" y="353" fill="#64748b" font-size="16">11.44s</text>
+    <text x="330" y="375" fill="#64748b" font-size="16">0.32s</text>
+    <text x="1152" y="364" fill="#76B900" font-size="22" font-weight="600" text-anchor="end">35.7×</text>
+
+    <text x="48" y="436" fill="#cbd5e1" font-size="19">weighted_score</text>
+    <rect x="300" y="420" width="493" height="15" rx="3" fill="#475569"/>
+    <rect x="300" y="442" width="42" height="15" rx="3" fill="#76B900"/>
+    <text x="805" y="433" fill="#64748b" font-size="16">8.69s</text>
+    <text x="354" y="455" fill="#64748b" font-size="16">0.74s</text>
+    <text x="1152" y="444" fill="#94a3b8" font-size="22" font-weight="600" text-anchor="end">11.8×</text>
+
+    <text x="48" y="516" fill="#cbd5e1" font-size="19">bomb_detect</text>
+    <rect x="300" y="500" width="273" height="15" rx="3" fill="#475569"/>
+    <rect x="300" y="522" width="9" height="15" rx="3" fill="#76B900"/>
+    <text x="585" y="513" fill="#64748b" font-size="16">4.82s</text>
+    <text x="321" y="535" fill="#64748b" font-size="16">0.16s</text>
+    <text x="1152" y="524" fill="#94a3b8" font-size="22" font-weight="600" text-anchor="end">30.7×</text>
+
+    <text x="48" y="596" fill="#cbd5e1" font-size="19">write_outputs</text>
+    <rect x="300" y="580" width="154" height="15" rx="3" fill="#475569"/>
+    <rect x="300" y="602" width="27" height="15" rx="3" fill="#76B900"/>
+    <text x="466" y="593" fill="#64748b" font-size="16">2.72s</text>
+    <text x="339" y="615" fill="#64748b" font-size="16">0.47s</text>
+    <text x="1152" y="604" fill="#94a3b8" font-size="22" font-weight="600" text-anchor="end">5.8×</text>
+  </g>
+</svg>

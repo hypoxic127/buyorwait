@@ -167,6 +167,8 @@ The app queries only aggregated tables and one game's vectors at a time — neve
 
 Same GCE `g2-standard-8` instance, dual run over **114,381,811 rows**: 8 vCPUs (`pandas`) vs NVIDIA L4 (`cudf.pandas`), **zero code changes**. Raw timings: [benchmarks/benchmark_results.csv](benchmarks/benchmark_results.csv).
 
+![Per-stage timings, pandas on 8 vCPUs versus cudf.pandas on an NVIDIA L4](benchmarks/benchmark-chart.svg)
+
 | Phase | pandas (CPU) | cudf.pandas (GPU) | Speedup | Time Saved |
 | :--- | ---: | ---: | ---: | ---: |
 | `read_parquet` | 1.69s | 0.73s | 2.3x | 57% |
